@@ -39,7 +39,18 @@ image = (
         "websockets>=12.0",
         "twilio>=9.0",
     )
-    .env({"GLC_CONFIG_DIR": "/data/glc"})
+    .env(
+        {
+            # Config dir (install token, user policy/channels overrides) on the Volume.
+            "GLC_CONFIG_DIR": "/data/glc",
+            # The three SQLite stores resolve their OWN env vars (default ~/.glc, the
+            # throwaway container disk), NOT GLC_CONFIG_DIR. Point them at the Volume too
+            # so the audit log, pairings, and worker-call ledger survive scale-to-zero.
+            "GLC_GATEWAY_DB": "/data/glc/gateway.sqlite",
+            "GLC_AUDIT_DB": "/data/glc/audit.sqlite",
+            "GLC_PAIRING_DB": "/data/glc/pairings.sqlite",
+        }
+    )
     .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
 )
 

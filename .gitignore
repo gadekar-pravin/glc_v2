@@ -37,3 +37,7 @@ install_token
 
 # Logs
 *.log
+
+# Personal / local-only (not part of the shared course repo)
+/ASSIGNMENT-Part1.md
+/AGENTS.md
