@@ -139,7 +139,7 @@ class Router:
     def __init__(self, providers: dict, order: list[str]):
         self.providers = providers
         self.order = [p for p in order if p in providers]
-        self.state = defaultdict(RateState)
+        self.state: defaultdict[str, RateState] = defaultdict(RateState)
         self.lock = asyncio.Lock()
 
     def candidates(self, override=None):
@@ -198,7 +198,7 @@ class RouterPool:
     def __init__(self, providers: dict, order: list[str]):
         self.providers = providers
         self.order = [p for p in order if p in providers]
-        self.state = defaultdict(RateState)
+        self.state: defaultdict[str, RateState] = defaultdict(RateState)
         self.lock = asyncio.Lock()
 
     def candidates(self):

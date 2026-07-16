@@ -116,7 +116,8 @@ def append(**kwargs: Any) -> int:
 
 def query(limit: int = 100, session_id: str | None = None, channel: str | None = None) -> list[dict]:
     q = "SELECT * FROM audit_log"
-    where, args = [], []
+    where: list[str] = []
+    args: list[str | int] = []
     if session_id:
         where.append("session_id=?")
         args.append(session_id)

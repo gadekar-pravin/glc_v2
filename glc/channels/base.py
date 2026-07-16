@@ -17,13 +17,14 @@ class ChannelAdapter(ABC):
         self.config = config or {}
 
     @abstractmethod
-    async def on_message(self, raw: Any) -> ChannelMessage:
+    async def on_message(self, raw: Any) -> ChannelMessage | None:
         """Translate a native wire-format event into a ChannelMessage.
 
         The wire format is channel-specific (Telegram Update, Discord
         gateway dispatch, Slack event payload, ...). The translation
         includes classifying the trust level via
-        glc.security.trust_level.classify().
+        glc.security.trust_level.classify(). Events that an adapter ignores
+        or rejects are represented by ``None``.
         """
         raise NotImplementedError("Group assignment: implement on_message and send in this adapter.")
 

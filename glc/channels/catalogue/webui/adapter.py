@@ -25,7 +25,7 @@ class Adapter(ChannelAdapter):
         self.mock = self.config.get("mock")
         self.is_public_channel = self.config.get("is_public_channel", False)
 
-    async def on_message(self, raw: Any) -> ChannelMessage:
+    async def on_message(self, raw: Any) -> ChannelMessage | None:
         """Convert incoming WebSocket frame to ChannelMessage."""
 
         # Handle disconnect gracefully
