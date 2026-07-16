@@ -5,6 +5,7 @@ S11 surfaces (transcribe, speak, channels WS, control) sit alongside.
 
 from __future__ import annotations
 
+import hmac
 import os
 import signal
 import time
@@ -12,8 +13,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT.parent / ".env")  # repo .env, if present
@@ -73,33 +74,76 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="GLC v1 — Gateway for LLMs and Channels", lifespan=lifespan)
-
-app.include_router(chat_route.router)
-app.include_router(transcribe_route.router)
-app.include_router(speak_route.router)
-app.include_router(control_route.router)
-app.include_router(channels_route.router)
+def _production_mode() -> bool:
+    return os.getenv("GLC_ENV", "").strip().lower() == "production"
 
 
-@app.get("/", response_class=HTMLResponse)
-async def index() -> str:
-    return (
-        "<html><body style='font-family:sans-serif;max-width:680px;margin:2em auto'>"
-        "<h1>GLC v1</h1>"
-        "<p>Gateway for LLMs and Channels — Session 11 scaffold.</p>"
-        "<p>Open <code>/docs</code> for the OpenAPI explorer.</p>"
-        "<p>Channel adapters connect over <code>WS /v1/channels/&lt;name&gt;</code>."
-        " V9 callers should point at this port unchanged: chat, vision, embed,"
-        " batch, cost-by-agent, providers, capabilities, status, calls."
-        "</p>"
-        "</body></html>"
+def create_app(*, production: bool | None = None) -> FastAPI:
+    """Build the gateway, applying the production perimeter when enabled."""
+    is_production = _production_mode() if production is None else production
+    application = FastAPI(
+        title="GLC v1 — Gateway for LLMs and Channels",
+        lifespan=lifespan,
+        openapi_url=None if is_production else "/openapi.json",
+        docs_url=None if is_production else "/docs",
+        redoc_url=None if is_production else "/redoc",
     )
 
+    application.include_router(chat_route.router)
+    application.include_router(transcribe_route.router)
+    application.include_router(speak_route.router)
+    application.include_router(control_route.router)
+    application.include_router(channels_route.router)
 
-@app.get("/healthz")
-async def healthz():
-    return {"ok": True, "port": PORT}
+    if is_production:
+
+        @application.middleware("http")
+        async def require_gateway_token(request: Request, call_next):
+            authorization = request.headers.get("Authorization")
+            if not authorization or not authorization.startswith("Bearer "):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "missing bearer token (Authorization: Bearer <install_token>)"},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+            presented = authorization.removeprefix("Bearer ").strip()
+            if not presented:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "missing bearer token (Authorization: Bearer <install_token>)"},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+            expected = get_or_create_install_token()
+            if not hmac.compare_digest(presented, expected):
+                return JSONResponse(status_code=403, content={"detail": "install token mismatch"})
+
+            return await call_next(request)
+
+    @application.get("/", response_class=HTMLResponse)
+    async def index() -> str:
+        docs_hint = "" if is_production else "<p>Open <code>/docs</code> for the OpenAPI explorer.</p>"
+        return (
+            "<html><body style='font-family:sans-serif;max-width:680px;margin:2em auto'>"
+            "<h1>GLC v1</h1>"
+            "<p>Gateway for LLMs and Channels — Session 11 scaffold.</p>"
+            f"{docs_hint}"
+            "<p>Channel adapters connect over <code>WS /v1/channels/&lt;name&gt;</code>."
+            " V9 callers should point at this port unchanged: chat, vision, embed,"
+            " batch, cost-by-agent, providers, capabilities, status, calls."
+            "</p>"
+            "</body></html>"
+        )
+
+    @application.get("/healthz")
+    async def healthz():
+        return {"ok": True, "port": PORT}
+
+    return application
+
+
+app = create_app()
 
 
 if __name__ == "__main__":

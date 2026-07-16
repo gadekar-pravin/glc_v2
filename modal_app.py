@@ -43,6 +43,9 @@ image = (
         {
             # Config dir (install token, user policy/channels overrides) on the Volume.
             "GLC_CONFIG_DIR": "/data/glc",
+            # Disable API documentation and require the persisted install token on
+            # every HTTP route exposed by the public Modal deployment.
+            "GLC_ENV": "production",
             # The three SQLite stores resolve their OWN env vars (default ~/.glc, the
             # throwaway container disk), NOT GLC_CONFIG_DIR. Point them at the Volume too
             # so the audit log, pairings, and worker-call ledger survive scale-to-zero.
@@ -79,4 +82,5 @@ def fastapi_app():
     os.makedirs("/data/glc", exist_ok=True)
 
     from glc.main import app as web  # the real glc_v1 app, imported as-is
+
     return web

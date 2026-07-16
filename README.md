@@ -20,12 +20,24 @@ uv run glc serve        # gateway on http://localhost:8111
 
 To deploy on Modal, see `modal_app.py` and Session 12 Section 6. Use mock keys only, and never put real provider keys on Modal.
 
+The Modal wrapper runs with `GLC_ENV=production`. Production disables `/openapi.json`, `/docs`, and
+`/redoc`, and every HTTP request requires the persisted installation token:
+
+```sh
+uv run modal volume get glc-data glc/install_token -
+curl -H "Authorization: Bearer <install_token>" \
+  https://<workspace>--glc-v1-gateway-fastapi-app.modal.run/healthz
+```
+
+The same bearer header is required for channel webhook URLs. Providers that cannot attach it need a
+separately authenticated ingress before those callbacks can be enabled.
+
 ## Where to look
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — trust boundaries and data flows. Start here for recon.
 - `glc/` — the gateway source.
 - `modal_app.py` — the Modal deployment wrapper.
-- `/openapi.json` and `/docs` on a running gateway — the full route inventory.
+- Local-only `/openapi.json` and `/docs` — disabled on production deployments.
 
 ## License
 
