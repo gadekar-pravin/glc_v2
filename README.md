@@ -32,6 +32,14 @@ curl -H "Authorization: Bearer <install_token>" \
 The same bearer header is required for channel webhook URLs. Providers that cannot attach it need a
 separately authenticated ingress before those callbacks can be enabled.
 
+Configuration and operational read endpoints require the installation token in every environment,
+including local development: `/v1/embedders`, `/v1/cost/by_agent`, `/v1/providers`,
+`/v1/capabilities`, `/v1/status`, `/v1/routers`, and `/v1/calls`. For example:
+
+```sh
+curl -H "Authorization: Bearer $(uv run glc token)" http://localhost:8111/v1/status
+```
+
 ## Where to look
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — trust boundaries and data flows. Start here for recon.

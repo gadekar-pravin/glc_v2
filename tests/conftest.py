@@ -55,3 +55,9 @@ def install_token(app_client):
     from glc.config import install_token_path
 
     return install_token_path().read_text().strip()
+
+
+@pytest.fixture
+def install_auth(install_token):
+    """Authorization header for routes protected by the install token."""
+    return {"Authorization": f"Bearer {install_token}"}
