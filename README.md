@@ -20,6 +20,11 @@ uv run glc serve        # gateway on http://localhost:8111
 
 To deploy on Modal, see `modal_app.py` and Session 12 Section 6. Use mock keys only, and never put real provider keys on Modal.
 
+The hardened deployment separates channel and external voice slots from the gateway. Its 22-slot
+least-privilege manifest, single-use tool credential flow, Telegram reference deployment, and safe
+proof command are documented in [`docs/SLOT_ISOLATION.md`](docs/SLOT_ISOLATION.md). Channel slots do
+not receive `glc-llm-keys` or the installation token.
+
 The Modal wrapper runs with `GLC_ENV=production`. Production disables `/openapi.json`, `/docs`, and
 `/redoc`, and every HTTP request requires the persisted installation token:
 

@@ -30,5 +30,5 @@ def require_install_token(
         )
 
     expected = get_or_create_install_token()
-    if not hmac.compare_digest(presented, expected):
+    if not hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=403, detail="install token mismatch")

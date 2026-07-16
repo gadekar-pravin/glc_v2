@@ -35,6 +35,9 @@ def test_healthz_requires_valid_bearer_token(production_client, production_auth)
     incorrect = production_client.get("/healthz", headers={"Authorization": "Bearer incorrect"})
     assert incorrect.status_code == 403
 
+    non_ascii = production_client.get("/healthz", headers=[(b"authorization", b"Bearer \xe2\x98\x83")])
+    assert non_ascii.status_code == 403
+
     authenticated = production_client.get("/healthz", headers=production_auth)
     assert authenticated.status_code == 200
     assert authenticated.json() == {"ok": True, "port": 8111}

@@ -29,6 +29,7 @@ from glc.policy import reload_engine  # noqa: E402
 from glc.routes import channels as channels_route  # noqa: E402
 from glc.routes import chat as chat_route  # noqa: E402
 from glc.routes import control as control_route  # noqa: E402
+from glc.routes import creds as creds_route  # noqa: E402
 from glc.routes import speak as speak_route  # noqa: E402
 from glc.routes import transcribe as transcribe_route  # noqa: E402
 from glc.routing import Router, RouterPool  # noqa: E402
@@ -88,17 +89,30 @@ def create_app(*, production: bool | None = None) -> FastAPI:
         docs_url=None if is_production else "/docs",
         redoc_url=None if is_production else "/redoc",
     )
+    application.state.production = is_production
 
     application.include_router(chat_route.router)
     application.include_router(transcribe_route.router)
     application.include_router(speak_route.router)
     application.include_router(control_route.router)
     application.include_router(channels_route.router)
+    application.include_router(creds_route.router)
 
     if is_production:
 
         @application.middleware("http")
         async def require_gateway_token(request: Request, call_next):
+            scoped_paths = {
+                "/v1/chat",
+                "/v1/chat/batch",
+                "/v1/vision",
+                "/v1/embed",
+                "/v1/transcribe",
+                "/v1/speak",
+                "/v1/creds/issue",
+            }
+            if request.url.path in scoped_paths:
+                return await call_next(request)
             authorization = request.headers.get("Authorization")
             if not authorization or not authorization.startswith("Bearer "):
                 return JSONResponse(
@@ -116,7 +130,7 @@ def create_app(*, production: bool | None = None) -> FastAPI:
                 )
 
             expected = get_or_create_install_token()
-            if not hmac.compare_digest(presented, expected):
+            if not hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):
                 return JSONResponse(status_code=403, content={"detail": "install token mismatch"})
 
             return await call_next(request)

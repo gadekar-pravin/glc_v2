@@ -1,5 +1,43 @@
 # Security findings
 
+## Leak 1 — Shared process environment exposed every provider key
+
+**Invariants broken.** Adapters must never see provider API keys. A credential must work only for one
+specific tool call.
+
+**Attacker role.** An attacker who controls code in any channel adapter running inside the monolithic
+gateway process.
+
+**Finding.** Move 1 attached `glc-llm-keys` to the same Modal Function that contained the gateway and
+all adapter code. A reproduction imported the real gateway and Telegram adapter in one interpreter,
+injected six mock values, and read all six through adapter-side `os.environ` access. The observed
+prefixes were `gemini...`, `groq...`, `nvidia...`, `cerebras...`, `openrouter...`, and `github...`.
+No live or stored credential was read.
+
+**Fix.** A validated manifest now defines 15 channel and 7 external voice slots. Production images
+exclude channel and external voice implementations from the gateway. Each slot runs in its own
+container with only its identity and declared channel/provider secret; channel images can never bind
+the LLM provider bundle. Production webhooks no longer instantiate catalogue adapters inside the
+gateway, and non-fallback voice calls use authenticated remote slots.
+
+Adapters authenticate to `POST /v1/creds/issue` with a per-slot identity. The gateway derives the
+slot rather than trusting a request field and issues a five-minute JWT for one allowed tool/model.
+The JTI is persisted and atomically consumed on its first correct use. Replays and forged, expired,
+wrong-tool, wrong-model, or unknown grants fail closed. Existing install-token clients remain
+compatible.
+
+**Post-fix evidence.** The process-isolation regression launches an adapter process with only its
+Telegram identity and mock channel token and confirms all six provider variables are absent. Static
+tests assert exactly 22 unique slots and reject provider keys in every channel manifest. Credential
+tests cover identity derivation, all six tool scopes, model binding, wrong-scope non-consumption,
+atomic concurrent use, replay, forgery, expiry, WebSocket identity binding, and install-token
+compatibility. The safe Modal probe and commands are documented in `docs/SLOT_ISOLATION.md`.
+
+The final live probe reported all six provider variables absent, first scoped use `502` at the mock
+provider boundary, replay `401`, cross-tool use `403`, and intended use after that denial `502`.
+Unauthenticated `/healthz` remained `401`; the persisted install token returned `200` for `/healthz`
+and reached the mock chat provider boundary with `502`.
+
 ## Full route map exposed by public OpenAPI document
 
 **Invariant broken.** Every externally reachable gateway surface must authenticate the caller before

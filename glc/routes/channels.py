@@ -22,9 +22,9 @@ from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSock
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from glc.audit import append as audit_append
-from glc.channels import registry
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.config import get_or_create_install_token
+from glc.creds.identity import IdentityError, authenticate_identity
 from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
@@ -41,7 +41,17 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
     elif token:
         presented = token
     expected = get_or_create_install_token()
-    if presented != expected:
+    install_authenticated = bool(
+        presented and hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+    )
+    slot_authenticated = False
+    if not install_authenticated and header_auth:
+        try:
+            slot = authenticate_identity(header_auth)
+            slot_authenticated = slot.kind == "channel" and slot.name == name
+        except IdentityError:
+            slot_authenticated = False
+    if not install_authenticated and not slot_authenticated:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -120,6 +130,8 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
 
 @router.get("/v1/channels/{name}/webhook")
 async def channel_webhook_verify(name: str, request: Request):
+    if bool(getattr(request.app.state, "production", False)):
+        raise HTTPException(status_code=404, detail="webhooks run in isolated slot containers")
     params = dict(request.query_params)
     mode = params.get("hub.mode", "")
     token = params.get("hub.verify_token", "")
@@ -132,6 +144,10 @@ async def channel_webhook_verify(name: str, request: Request):
 
 @router.post("/v1/channels/{name}/webhook")
 async def channel_webhook(name: str, request: Request):
+    if bool(getattr(request.app.state, "production", False)):
+        raise HTTPException(status_code=404, detail="webhooks run in isolated slot containers")
+    from glc.channels import registry
+
     try:
         adapter = registry.instantiate(name)
     except KeyError:

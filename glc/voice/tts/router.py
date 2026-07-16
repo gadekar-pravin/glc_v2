@@ -15,6 +15,7 @@ their owning groups land an implementation.
 from __future__ import annotations
 
 import importlib
+import os
 
 from glc.voice.tts.base import SynthesizeResult, TTSError, TTSProvider
 
@@ -51,6 +52,10 @@ async def synthesize(text: str, voice_id: str | None = None, prefer: str = "defa
     if prefer not in PREFER_TO_PROVIDER:
         raise TTSError(f"unknown prefer={prefer!r}. Pick one of: {list(PREFER_TO_PROVIDER)}")
     name = PREFER_TO_PROVIDER[prefer]
+    if os.getenv("GLC_ENV", "").strip().lower() == "production" and name != "system_fallback":
+        from glc.voice.remote import remote_synthesize
+
+        return await remote_synthesize(f"tts_{name}", text, voice_id)
     provider = _load_provider(name)
     try:
         return await provider.synthesize(text, voice_id)

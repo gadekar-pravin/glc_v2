@@ -1,11 +1,12 @@
 """
-Modal deployment wrapper for glc_v1  (Session 12, Move 1: wrap the gateway).
+Modal deployment wrapper for the isolated GLC gateway.
 
 This file changes NO application code. It only describes, for Modal:
   1. the container image to build,
   2. a persistent Volume for the ~/.glc config/db folder,
-  3. a Secret that supplies the provider keys as environment variables,
-  4. which object to serve  ->  the existing FastAPI app, glc.main:app.
+  3. gateway-only provider and credential-signing Secrets,
+  4. per-slot identities used to authenticate isolated adapters,
+  5. which object to serve  ->  glc.main:app.
 
 Deploy with:   uv run modal deploy modal_app.py
 """
@@ -17,10 +18,24 @@ import modal
 # The Modal "app" is just a namespace for everything we deploy under this name.
 app = modal.App("glc-v1-gateway")
 
-# Path to the glc package next to this file. We copy the whole package (not just
-# .py files) so its data files travel too: policy.yaml, channels.yaml,
-# audit/schema.sql, and the channel catalogue.
+# Path to the glc package next to this file.
 LOCAL_GLC = Path(__file__).parent / "glc"
+
+
+def _gateway_ignore(path: Path) -> bool:
+    """Keep untrusted slot implementations out of the gateway image."""
+    try:
+        parts = path.relative_to(LOCAL_GLC).parts
+    except ValueError:
+        return False
+    if len(parts) >= 3 and parts[:2] == ("channels", "catalogue"):
+        return True
+    if len(parts) >= 4 and parts[:3] == ("voice", "stt", "providers"):
+        return True
+    if len(parts) >= 4 and parts[:3] == ("voice", "tts", "providers"):
+        return parts[3] != "system_fallback"
+    return False
+
 
 # The image = a Linux box with Python 3.11, the same dependencies as
 # pyproject.toml, the glc package copied in, and GLC_CONFIG_DIR pointed at the
@@ -36,6 +51,7 @@ image = (
         "pydantic>=2.6",
         "jsonschema>=4.21",
         "pyyaml>=6.0",
+        "pyjwt>=2.9",
         "websockets>=12.0",
         "twilio>=9.0",
     )
@@ -54,7 +70,7 @@ image = (
             "GLC_PAIRING_DB": "/data/glc/pairings.sqlite",
         }
     )
-    .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc")
+    .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc", ignore=_gateway_ignore)
 )
 
 # A persistent Volume. The audit db, pairing db, and install token live here and
@@ -64,17 +80,20 @@ data_volume = modal.Volume.from_name("glc-data", create_if_missing=True)
 # The provider keys, injected as environment variables at runtime. Created
 # separately with `modal secret create glc-llm-keys ...` (mock values for now).
 llm_secret = modal.Secret.from_name("glc-llm-keys")
+signing_secret = modal.Secret.from_name("glc-creds-signing-key")
+telegram_identity_secret = modal.Secret.from_name("telegram-slot-identity")
 
 
 @app.function(
     image=image,
     volumes={"/data": data_volume},
-    secrets=[llm_secret],
+    secrets=[llm_secret, signing_secret, telegram_identity_secret],
     min_containers=0,  # scale to zero when idle -> protects the free tier
+    max_containers=1,  # SQLite single-use ledger requires one writer container
 )
 @modal.asgi_app()
 def fastapi_app():
-    """Serve the unchanged glc_v1 FastAPI app."""
+    """Serve the gateway without channel or external voice slot code."""
     import os
 
     # The gateway writes its databases and install token here on startup, so the

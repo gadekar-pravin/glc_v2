@@ -17,6 +17,7 @@ provider into `_TEST_PROVIDERS`.
 from __future__ import annotations
 
 import importlib
+import os
 
 from glc.voice.stt.base import STTError, STTProvider, TranscribeResult
 
@@ -57,6 +58,10 @@ async def transcribe(audio: bytes, mime: str, prefer: str = "default") -> Transc
     if prefer not in PREFER_TO_PROVIDER:
         raise STTError(f"unknown prefer={prefer!r}. Pick one of: {list(PREFER_TO_PROVIDER)}")
     name = PREFER_TO_PROVIDER[prefer]
+    if os.getenv("GLC_ENV", "").strip().lower() == "production":
+        from glc.voice.remote import remote_transcribe
+
+        return await remote_transcribe(f"stt_{name}", audio, mime)
     # `streaming` belongs on the Gemini Live WebSocket route, not this
     # synchronous endpoint. The dispatcher refuses cleanly so callers
     # don't accidentally bill a slow upstream for a streaming use case.

@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -626,6 +626,7 @@ dependencies = [
     { name = "jsonschema" },
     { name = "modal" },
     { name = "pydantic" },
+    { name = "pyjwt" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "twilio" },
@@ -649,6 +650,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.21" },
     { name = "modal", specifier = ">=1.5.1" },
     { name = "pydantic", specifier = ">=2.6" },
+    { name = "pyjwt", specifier = ">=2.9" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "twilio", specifier = ">=9.0" },

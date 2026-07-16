@@ -16,15 +16,16 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import yaml
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from jsonschema import Draft202012Validator, ValidationError
 
 from glc import db
 from glc import providers as P
+from glc.creds.auth import authorize_tool_request
 from glc.llm_schemas import (
     BatchChatRequest,
     ChatRequest,
@@ -335,8 +336,7 @@ def _validate_structured(text: str, schema: dict):
 # ─────────────────────────── routes ───────────────────────────
 
 
-@router.post("/v1/chat")
-async def chat(req: ChatRequest, request: Request):
+async def _chat_impl(req: ChatRequest, request: Request):
     state = request.app.state
     rtr = state.router
     router_pool = state.router_pool
@@ -630,14 +630,39 @@ async def chat(req: ChatRequest, request: Request):
     raise HTTPException(503, PUBLIC_UPSTREAM_ERROR)
 
 
+@router.post("/v1/chat")
+async def chat(
+    req: ChatRequest,
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+):
+    authorize_tool_request(
+        request,
+        authorization,
+        tool="llm.chat",
+        expected_models={req.model},
+    )
+    return await _chat_impl(req, request)
+
+
 @router.post("/v1/chat/batch")
-async def chat_batch(req: BatchChatRequest, request: Request):
+async def chat_batch(
+    req: BatchChatRequest,
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+):
+    authorize_tool_request(
+        request,
+        authorization,
+        tool="llm.chat.batch",
+        expected_models={call.model for call in req.calls},
+    )
     sem = _asyncio.Semaphore(max(1, req.max_concurrency))
 
     async def _one(call: ChatRequest):
         async with sem:
             try:
-                return await chat(call, request)
+                return await _chat_impl(call, request)
             except HTTPException as he:
                 return {"error": str(he.detail), "status_code": he.status_code}
             except Exception:
@@ -649,7 +674,17 @@ async def chat_batch(req: BatchChatRequest, request: Request):
 
 
 @router.post("/v1/vision")
-async def vision(req: VisionRequest, request: Request):
+async def vision(
+    req: VisionRequest,
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+):
+    authorize_tool_request(
+        request,
+        authorization,
+        tool="llm.vision",
+        expected_models={req.model},
+    )
     content: list[dict[str, Any]] = [{"type": "text", "text": req.prompt}]
     content.append({"type": "image_url", "image_url": {"url": req.image}})
     inner = ChatRequest(
@@ -667,11 +702,16 @@ async def vision(req: VisionRequest, request: Request):
         agent=req.agent,
         session=req.session,
     )
-    return await chat(inner, request)
+    return await _chat_impl(inner, request)
 
 
 @router.post("/v1/embed")
-async def embed(req: EmbedRequest, request: Request):
+async def embed(
+    req: EmbedRequest,
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+):
+    authorize_tool_request(request, authorization, tool="llm.embed")
     from glc import embedders as E
 
     state = request.app.state
