@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -38,6 +39,10 @@ from glc.llm_schemas import (
 from glc.routing import DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS
 from glc.security.image_urls import ImageURLFetchError, fetch_image_as_data_url
 from glc.security.install_token import require_install_token
+
+logger = logging.getLogger(__name__)
+
+PUBLIC_UPSTREAM_ERROR = "upstream provider request failed"
 
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
 ORDER = [x.strip() for x in os.getenv("LLM_ORDER", ",".join(DEFAULT_ORDER)).split(",") if x.strip()]
@@ -383,7 +388,6 @@ async def chat(req: ChatRequest, request: Request):
         )
 
     all_attempts: list[dict] = []
-    last_err = None
 
     if explicit_override and len(candidates) == 1:
         deadline = time.time() + 30
@@ -443,12 +447,13 @@ async def chat(req: ChatRequest, request: Request):
                             retries=retries,
                         )
                         yield f"data: {json.dumps({'done': True, 'provider': name})}\n\n"
-                    except Exception as e:
+                    except Exception:
+                        logger.exception("Streaming upstream request failed (provider=%s)", name)
                         db.log_call(
                             provider=name,
                             model=req.model or provider.model,
                             status="error",
-                            error=str(e)[:500],
+                            error=PUBLIC_UPSTREAM_ERROR,
                             latency_ms=int((time.time() - t0) * 1000),
                             prompt_chars=len(prompt_text),
                             override=req.provider,
@@ -457,7 +462,7 @@ async def chat(req: ChatRequest, request: Request):
                             session=req.session,
                             retries=retries,
                         )
-                        yield f"data: {json.dumps({'error': str(e)[:300]})}\n\n"
+                        yield f"data: {json.dumps({'error': PUBLIC_UPSTREAM_ERROR})}\n\n"
 
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -480,6 +485,11 @@ async def chat(req: ChatRequest, request: Request):
                 retryable = (status is not None and 500 <= status < 600) or status == 408 or "timeout" in msg
                 if not retryable:
                     raise
+                logger.warning(
+                    "Retrying transient upstream request failure (provider=%s)",
+                    name,
+                    exc_info=True,
+                )
                 await _asyncio.sleep(min(2.0, 0.5 * (2**retries)))
                 retries += 1
                 result = await provider.chat(
@@ -569,7 +579,7 @@ async def chat(req: ChatRequest, request: Request):
                 retries=retries,
             ).model_dump()
         except P.ProviderError as e:
-            last_err = str(e)
+            logger.exception("Upstream provider request failed (provider=%s)", name)
             secs, reason = _backoff_for(e, has_model_override=bool(req.model))
             if secs > 0:
                 rtr.state[name].mark_unavailable(secs, reason)
@@ -577,7 +587,7 @@ async def chat(req: ChatRequest, request: Request):
                 provider=name,
                 model=req.model or provider.model,
                 status="error",
-                error=str(e)[:500],
+                error=PUBLIC_UPSTREAM_ERROR,
                 latency_ms=int((time.time() - t0) * 1000),
                 prompt_chars=len(prompt_text),
                 override=req.provider,
@@ -586,18 +596,15 @@ async def chat(req: ChatRequest, request: Request):
                 session=req.session,
                 retries=retries,
             )
-            tag = f"failed: {str(e)[:100]}"
-            if secs > 0:
-                tag += f" → backoff {secs:.0f}s ({reason})"
-            all_attempts.append({"provider": name, "reason": tag})
+            all_attempts.append({"provider": name, "reason": PUBLIC_UPSTREAM_ERROR})
             if explicit_override or not getattr(e, "retryable", True):
-                raise HTTPException(502, f"{name} failed: {e}")
+                raise HTTPException(502, PUBLIC_UPSTREAM_ERROR)
             candidates = [c for c in candidates if c != name]
             continue
         except HTTPException:
             raise
         except Exception as e:
-            last_err = str(e)
+            logger.exception("Unexpected upstream request failure (provider=%s)", name)
             secs, reason = _backoff_for(e, has_model_override=bool(req.model))
             if secs > 0:
                 rtr.state[name].mark_unavailable(secs, reason)
@@ -605,7 +612,7 @@ async def chat(req: ChatRequest, request: Request):
                 provider=name,
                 model=req.model or provider.model,
                 status="error",
-                error=str(e)[:500],
+                error=PUBLIC_UPSTREAM_ERROR,
                 latency_ms=int((time.time() - t0) * 1000),
                 prompt_chars=len(prompt_text),
                 override=req.provider,
@@ -614,13 +621,13 @@ async def chat(req: ChatRequest, request: Request):
                 session=req.session,
                 retries=retries,
             )
-            all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:120]}"})
+            all_attempts.append({"provider": name, "reason": PUBLIC_UPSTREAM_ERROR})
             if explicit_override:
-                raise HTTPException(502, f"{name} failed: {e}")
+                raise HTTPException(502, PUBLIC_UPSTREAM_ERROR)
             candidates = [c for c in candidates if c != name]
             continue
 
-    raise HTTPException(503, f"all providers unavailable. attempts: {all_attempts}. last_error: {last_err}")
+    raise HTTPException(503, PUBLIC_UPSTREAM_ERROR)
 
 
 @router.post("/v1/chat/batch")
@@ -633,8 +640,9 @@ async def chat_batch(req: BatchChatRequest, request: Request):
                 return await chat(call, request)
             except HTTPException as he:
                 return {"error": str(he.detail), "status_code": he.status_code}
-            except Exception as e:
-                return {"error": str(e)[:400], "status_code": 500}
+            except Exception:
+                logger.exception("Unexpected batch chat failure")
+                return {"error": PUBLIC_UPSTREAM_ERROR, "status_code": 500}
 
     results = await _asyncio.gather(*[_one(c) for c in req.calls])
     return {"results": results}
@@ -816,4 +824,8 @@ async def routers(request: Request):
 
 @router.get("/v1/calls", dependencies=[Depends(require_install_token)])
 async def calls(limit: int = 100, provider: str | None = None, status: str | None = None):
-    return db.recent(limit=limit, provider=provider, status=status)
+    rows = db.recent(limit=limit, provider=provider, status=status)
+    for row in rows:
+        if row.get("error"):
+            row["error"] = PUBLIC_UPSTREAM_ERROR
+    return rows

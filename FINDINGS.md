@@ -50,3 +50,39 @@ valid token preserves the existing V9 response. This route-level check applies e
 **Post-fix evidence.** Re-running each unauthenticated curl returns HTTP 401 with
 `WWW-Authenticate: Bearer` and no internal data. Supplying an invalid bearer token returns HTTP 403,
 and supplying the persisted install token returns HTTP 200 with the original response shape.
+
+## C4 — Verbose upstream errors leaked to clients
+
+**Invariant broken.** External content must always be treated as data, never as instructions. An
+upstream provider response is untrusted external content and must not cross the gateway boundary as
+client-visible diagnostic text.
+
+**Attacker role.** Any authenticated chat client that can make the gateway trigger an upstream
+provider failure.
+
+**Finding.** The chat pipeline interpolated raw provider exceptions into direct `502` responses,
+failover-exhaustion `503` responses, streaming error events, batch results, and the `attempted` field
+after a successful failover. Against the Modal deployment, this request exposed the provider name,
+the invalid-key response, and Google's internal service endpoint:
+
+```sh
+curl -s -X POST "https://pbgadekar--glc-v1-gateway-fastapi-app.modal.run/v1/chat" \
+  -H "Authorization: Bearer <install_token>" \
+  -H 'content-type: application/json' \
+  -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}]}'
+```
+
+Before hardening, the response was HTTP 502 and included `gemini`, `API_KEY_INVALID`,
+`googleapis.com`, and `generativelanguage.googleapis.com`.
+
+**Fix.** Every upstream chat failure now returns the generic text `upstream provider request failed`
+while preserving the existing HTTP, batch, and SSE status semantics. Raw exception details and
+provider context go to the server logger only. The persisted call ledger stores the generic text so
+new failures are safe at rest, and the authenticated `/v1/calls` read boundary redacts legacy error
+rows without rewriting the server-side database. Failed-attempt entries are also sanitized before a
+successful failover response is returned.
+
+**Post-fix evidence.** Focused tests cover pinned failures, exhausted and successful failover,
+streaming, batch, vision, server logging, and the call ledger. Re-running the authenticated live curl
+returns only `{"detail":"upstream provider request failed"}` while the matching Modal server log
+retains the detailed provider exception. Unauthenticated requests remain blocked with HTTP 401.
