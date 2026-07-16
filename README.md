@@ -40,6 +40,12 @@ including local development: `/v1/embedders`, `/v1/cost/by_agent`, `/v1/provider
 curl -H "Authorization: Bearer $(uv run glc token)" http://localhost:8111/v1/status
 ```
 
+Remote images used by `/v1/chat` and `/v1/vision` are disabled by default. To enable specific image
+hosts, set `GLC_IMAGE_URL_ALLOWED_HOSTS` to a comma-separated list of exact hostnames (for example,
+`images.example.com,cdn.example.com`). Each host must also resolve exclusively to publicly routable
+IPv4 or IPv6 addresses, and the allowlist and addresses are checked again after every redirect.
+Inline `data:` image URLs do not require an allowlist entry.
+
 ## Where to look
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — trust boundaries and data flows. Start here for recon.

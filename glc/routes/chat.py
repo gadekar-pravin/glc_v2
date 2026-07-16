@@ -36,6 +36,7 @@ from glc.llm_schemas import (
     VisionRequest,
 )
 from glc.routing import DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS
+from glc.security.image_urls import ImageURLFetchError, fetch_image_as_data_url
 from glc.security.install_token import require_install_token
 
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
@@ -287,25 +288,6 @@ def _required_caps(req: ChatRequest):
 
 
 async def _resolve_image_urls(messages):
-    import base64
-
-    import httpx as _httpx
-
-    async def _fetch_to_data_url(url: str) -> str:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
-            "Accept": "image/*,*/*;q=0.8",
-        }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
-                r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
-
     out = []
     for m in messages:
         content = m.get("content")
@@ -319,7 +301,10 @@ async def _resolve_image_urls(messages):
                 iu = b.get("image_url")
                 url = iu.get("url") if isinstance(iu, dict) else iu
                 if isinstance(url, str) and url.startswith(("http://", "https://")):
-                    data_url = await _fetch_to_data_url(url)
+                    try:
+                        data_url = await fetch_image_as_data_url(url)
+                    except ImageURLFetchError as e:
+                        raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
                     new_blocks.append({"type": "image_url", "image_url": {"url": data_url}})
                     changed = True
                     continue
