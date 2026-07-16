@@ -38,6 +38,49 @@ provider boundary, replay `401`, cross-tool use `403`, and intended use after th
 Unauthenticated `/healthz` remained `401`; the persisted install token returned `200` for `/healthz`
 and reached the mock chat provider boundary with `502`.
 
+## Leak 2 — In-process code could erase the audit history
+
+**Invariant broken.** Invariant 7: every security-relevant action must be recorded in an append-only,
+tamper-evident history.
+
+**Attacker role.** Code executing inside the gateway process with the gateway's filesystem identity.
+Before slot isolation, this included every in-process channel adapter.
+
+**Finding.** The audit API exposed only `append()`, but the SQLite database had no database-level
+write protection and no integrity chain. On Modal, `GLC_CONFIG_DIR` and `GLC_AUDIT_DB` both resolve
+to `/data/glc`, so this statement opened the real audit file and silently removed every row:
+
+```python
+import os, sqlite3
+p = os.path.join(os.getenv("GLC_CONFIG_DIR", "."), "audit.sqlite")
+sqlite3.connect(p).execute("DELETE FROM audit_log")
+```
+
+The safe pre-fix reproduction used an isolated temporary database and reported
+`rows_before=1`, `deleted_rows=1`, `rows_after=0`, and zero protective triggers.
+
+**Fix.** Audit schema v2 adds `BEFORE UPDATE` and `BEFORE DELETE` triggers that abort mutation with
+`audit_log is append-only`. Every row now stores the previous entry hash and a SHA-256 hash over its
+ID, all stored audit fields, and that previous hash. Appends take a SQLite immediate write lock,
+calculate and insert the complete row atomically, and commit before returning. Startup validates the
+schema, both triggers, and the complete chain; any mismatch raises `AuditIntegrityError` and prevents
+the gateway from serving traffic.
+
+Existing schema-v1 databases migrate transactionally. The migration preserves row IDs, payloads,
+timestamps, ordering, and the prior AUTOINCREMENT high-water mark while backfilling the chain. Rows
+erased before this fix cannot be recovered. The existing `glc-data` volume remains mounted only on
+the gateway Modal function; isolated adapter functions have no access to it.
+
+**Post-fix evidence.** The same temporary reproduction now reports `delete_blocked=True`, error
+`audit_log is append-only`, `rows_before=1`, `rows_after=1`, and `chain_valid=True`. Focused tests
+also cover direct updates, v1 migration, concurrent appends, content and link tampering, missing
+triggers, unsupported schemas, and gateway-only volume access.
+
+The final gateway-spec Modal probe targeted the deployed `/data/glc/audit.sqlite` and reported
+`schema_version=2`, `target_matches_audit_env=true`, `delete_blocked=true`,
+`rows_before=1`, `rows_after=1`, and `chain_valid=true`. The authenticated live health check
+continued to return HTTP 200 with `{"ok": true, "port": 8111}`.
+
 ## Full route map exposed by public OpenAPI document
 
 **Invariant broken.** Every externally reachable gateway surface must authenticate the caller before

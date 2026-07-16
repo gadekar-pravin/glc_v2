@@ -32,12 +32,13 @@ erased by context compaction. Yaml does not compact.
 
 ## 3. Memory is classed with per-class write permissions
 
-The audit store (`glc/audit/`) is append-only: only `append()` is
-exposed; no `update`, no `delete`. The pairing store, the channels
-configuration, and the policy rules all live outside the LLM's
-write reach. Sessions 12 and onward expand the memory taxonomy to
-working / episodic / semantic / procedural classes; the
-write-permission discipline begins here.
+The audit store (`glc/audit/`) is database-enforced append-only. Its
+SQLite schema rejects `UPDATE` and `DELETE`, and every row is linked to
+the SHA-256 hash of its predecessor. The pairing store, the channels
+configuration, and the policy rules all live outside the LLM's write
+reach. Sessions 12 and onward expand the memory taxonomy to working /
+episodic / semantic / procedural classes; the write-permission
+discipline begins here.
 
 Lives in: `glc/audit/`, `glc/security/pairing.py`, `glc/config.py`.
 Answers: persistent-prompt-injection attacks that would otherwise
@@ -74,9 +75,18 @@ scraped from the inbox can carry instructions, but it arrives with
 
 `glc/audit/store.py` writes to `~/.glc/audit.sqlite`. Each row carries
 session id, channel, sender id, trust level, event type, tool, policy
-verdict, params, result. The S8 replay viewer reads from the same
-store. Each insert commits immediately so the trail survives a hard
-kill.
+verdict, params, result, the previous hash, and its own entry hash. A
+canonical SHA-256 chain binds the row ID and every stored field to its
+predecessor. SQLite triggers reject direct updates and deletes, and
+startup fails closed if the schema, triggers, or chain do not verify.
+Each append uses an immediate transaction and commits before returning,
+so concurrent writes serialize and the trail survives a hard kill.
+
+Schema-v1 databases migrate in place before the gateway starts. The
+transactional migration preserves existing rows and the AUTOINCREMENT
+high-water mark while backfilling the chain. On Modal, the persistent
+volume containing the audit database is attached only to the gateway
+function; isolated channel and external voice slots cannot mount it.
 
 Lives in: `glc/audit/`.
 Answers: the recovery scenario after a bad outcome — the operator

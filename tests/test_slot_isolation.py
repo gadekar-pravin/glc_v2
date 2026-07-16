@@ -43,6 +43,16 @@ def test_gateway_and_telegram_image_filters_enforce_code_boundary():
     assert modal_telegram._ignore(root / "routes/chat.py")
 
 
+def test_audit_volume_is_mounted_only_on_gateway_function():
+    import modal_app
+    import modal_telegram
+
+    assert set(modal_app.fastapi_app.spec.volumes) == {"/data"}
+    assert repr(modal_app.fastapi_app.spec.volumes["/data"]) == repr(modal_app.data_volume)
+    assert modal_telegram.telegram_adapter.spec.volumes == {}
+    assert modal_telegram.security_probe.spec.volumes == {}
+
+
 def test_adapter_process_environment_does_not_inherit_gateway_provider_keys(tmp_path):
     gateway_env = os.environ.copy()
     for key in PROVIDER_SECRET_KEYS:
