@@ -19,7 +19,20 @@ def _ignore(path: Path) -> bool:
     parts = rel.parts
     if len(parts) >= 3 and parts[:2] == ("channels", "catalogue"):
         return parts[2] != "telegram"
-    return bool(parts and parts[0] in {"audit", "policy", "providers.py", "routes", "voice"})
+    return bool(
+        parts
+        and parts[0]
+        in {
+            "audit",
+            "config.py",
+            "db.py",
+            "policy",
+            "providers.py",
+            "routes",
+            "security",
+            "voice",
+        }
+    )
 
 
 image = (

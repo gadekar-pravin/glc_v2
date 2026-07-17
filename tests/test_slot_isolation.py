@@ -41,6 +41,9 @@ def test_gateway_and_telegram_image_filters_enforce_code_boundary():
     assert modal_telegram._ignore(root / "channels/catalogue/discord/adapter.py")
     assert modal_telegram._ignore(root / "providers.py")
     assert modal_telegram._ignore(root / "routes/chat.py")
+    assert modal_telegram._ignore(root / "security/pairing.py")
+    assert modal_telegram._ignore(root / "security/trust_level.py")
+    assert modal_telegram._ignore(root / "config.py")
 
 
 def test_audit_volume_is_mounted_only_on_gateway_function():
@@ -79,3 +82,19 @@ def test_adapter_process_environment_does_not_inherit_gateway_provider_keys(tmp_
         cwd=tmp_path,
     )
     assert all(value is False for value in json.loads(result.stdout).values())
+
+
+def test_channel_adapters_do_not_import_gateway_pairing_or_trust_code():
+    catalogue = Path(__file__).parents[1] / "glc" / "channels" / "catalogue"
+    adapters = sorted(catalogue.glob("*/adapter.py"))
+    assert len(adapters) == 15
+    forbidden = (
+        "glc.security.pairing",
+        "glc.security.trust_level",
+        "glc.security.allowlists",
+        "get_pairing_store",
+        "force_pair_owner",
+    )
+    for adapter in adapters:
+        source = adapter.read_text()
+        assert not any(name in source for name in forbidden), adapter

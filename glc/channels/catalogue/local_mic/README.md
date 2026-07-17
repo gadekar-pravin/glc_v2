@@ -34,13 +34,13 @@ input before STT, so `silence.wav` produces no envelope and speech keeps an
 
 The failing tests live at `tests/channels/test_local_mic.py`. They cover:
 
-1. `on_message` builds a valid `ChannelMessage` for owner and stranger inputs.
-2. Trust level resolves to `owner_paired` / `user_paired` / `untrusted` correctly.
+1. `on_message` builds a valid `ChannelIngress` from provider-owned facts.
+2. The adapter leaves trust unset; the authenticated gateway classifies the sender.
 3. `send` produces a valid wire-format payload and reaches the mock.
 4. The adapter handles forced disconnects without raising.
 5. Rate-limit responses propagate to the caller as a 429.
-6. In public channels with the default `mention_only_in_public: true`, the
-   adapter consults the allowlist before processing strangers.
+6. Public-channel and mention context is emitted as metadata so the gateway can
+   apply its authoritative allowlist.
 
 The mock-API fake at `tests/channels/mocks/local_mic_mock.py` is your contract
 surface. Do **not** edit the mock or the test file — they are fixed. The

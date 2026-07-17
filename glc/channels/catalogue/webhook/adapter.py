@@ -17,10 +17,7 @@ import httpx
 
 from glc.channels.base import ChannelAdapter
 from glc.channels.catalogue.webhook.schemas import WebhookInbound
-from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.security.allowlists import allowed
-from glc.security.pairing import get_pairing_store
-from glc.security.trust_level import classify
+from glc.channels.envelope import ChannelIngress, ChannelReply
 
 # Stripe-style webhooks reject bodies older than five minutes (replay window).
 REPLAY_WINDOW_SECONDS = 300
@@ -50,54 +47,41 @@ class Adapter(ChannelAdapter):
         expected = hmac.new(secret.encode(), signed, sha256).hexdigest()
         return hmac.compare_digest(expected, received)
 
-    async def on_message(self, raw: Any) -> ChannelMessage:
+    async def on_message(self, raw: Any) -> ChannelIngress:
         mock = self.config.get("mock")
         if mock is not None and hasattr(mock, "pop_disconnect") and mock.pop_disconnect():
-            return cast(ChannelMessage, None)
+            return cast(ChannelIngress, None)
 
         if not isinstance(raw, dict):
-            return cast(ChannelMessage, None)
+            return cast(ChannelIngress, None)
 
         raw_body = raw.get("raw_body")
         headers = raw.get("headers")
         if not isinstance(raw_body, bytes) or not isinstance(headers, dict):
-            return cast(ChannelMessage, None)
+            return cast(ChannelIngress, None)
 
         normalized_headers = {str(k): str(v) for k, v in headers.items()}
         if not self._verify(raw_body, normalized_headers):
-            return cast(ChannelMessage, None)
+            return cast(ChannelIngress, None)
 
         try:
             inbound = WebhookInbound.model_validate_json(raw_body)
         except Exception:
-            return cast(ChannelMessage, None)
+            return cast(ChannelIngress, None)
 
         channel = self.name
-        trust_level = classify(channel, inbound.sender_id)
         is_public_channel = bool(self.config.get("is_public_channel", False))
         was_mentioned = bool(self.config.get("was_mentioned", False))
-
-        owners = [rec.channel_user_id for rec in get_pairing_store().owners(channel=channel)]
-        ok, _ = allowed(
-            channel,
-            inbound.sender_id,
-            owner_ids=owners,
-            is_public_channel=is_public_channel,
-            was_mentioned=was_mentioned,
-        )
-        if is_public_channel and not ok:
-            return cast(ChannelMessage, None)
 
         metadata = dict(inbound.metadata)
         metadata["is_public_channel"] = is_public_channel
         metadata["was_mentioned"] = was_mentioned
 
-        return ChannelMessage(
+        return ChannelIngress(
             channel=channel,
             channel_user_id=inbound.sender_id,
             user_handle=inbound.sender_handle,
             text=inbound.text,
-            trust_level=trust_level,
             arrived_at=datetime.now(UTC),
             metadata=metadata,
         )

@@ -1,8 +1,8 @@
-"""FastAPI bridge from real LINE webhooks.
+"""Isolated FastAPI slot runtime for real LINE webhooks.
 
-This is live/demo wiring, not part of the narrow adapter contract tested by
-tests/channels/test_line.py. It intentionally drives the same Adapter class the
-tests use, with a real transport object standing in for LineMock.
+This process verifies and parses provider events, forwards the resulting
+``ChannelIngress`` to the authenticated gateway WebSocket, then translates the
+gateway reply back to LINE.  It never reads pairing state or assigns trust.
 """
 
 from __future__ import annotations
@@ -18,33 +18,25 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from glc.channels.catalogue.line.adapter import Adapter, LineTransport
-from glc.channels.envelope import ChannelReply
+from glc.channels.envelope import ChannelIngress, ChannelReply
 
 LINE_MESSAGE_API = "https://api.line.me/v2/bot/message"
-DEFAULT_AGENT_URL = "http://127.0.0.1:8200/agent/query"
-DEFAULT_ACK_TEXT = "Got it. I am working on your answer."
-DEFAULT_NOT_PAIRED_TEXT = (
-    "This LINE account is not paired with the assistant yet. "
-    "Ask the owner to pair this LINE user id, then try again."
-)
-DEFAULT_AGENT_UNAVAILABLE_TEXT = "The EAG3-09 agent is unavailable right now. Please try again later."
+DEFAULT_GATEWAY_WS_URL = "ws://127.0.0.1:8111/v1/channels/line"
 
-AskAgent = Callable[[str], Awaitable[str]]
+RelayGateway = Callable[[ChannelIngress], Awaitable[ChannelReply | dict[str, Any]]]
 
 
 @dataclass(frozen=True)
 class BridgeConfig:
     access_token: str | None
     channel_secret: str | None
-    agent_url: str
-    ack_text: str
-    not_paired_text: str
-    agent_unavailable_text: str
-    agent_timeout_s: float
+    gateway_ws_url: str
+    slot_identity: str | None
 
     @classmethod
     def from_env(cls) -> BridgeConfig:
@@ -52,11 +44,8 @@ class BridgeConfig:
         return cls(
             access_token=os.getenv("LINE_CHANNEL_ACCESS_TOKEN"),
             channel_secret=os.getenv("LINE_CHANNEL_SECRET"),
-            agent_url=os.getenv("AGENT_URL", DEFAULT_AGENT_URL),
-            ack_text=os.getenv("LINE_ACK_TEXT", DEFAULT_ACK_TEXT),
-            not_paired_text=os.getenv("LINE_NOT_PAIRED_TEXT", DEFAULT_NOT_PAIRED_TEXT),
-            agent_unavailable_text=os.getenv("LINE_AGENT_UNAVAILABLE_TEXT", DEFAULT_AGENT_UNAVAILABLE_TEXT),
-            agent_timeout_s=float(os.getenv("AGENT_TIMEOUT_S", "300")),
+            gateway_ws_url=os.getenv("GLC_GATEWAY_WS_URL", DEFAULT_GATEWAY_WS_URL),
+            slot_identity=os.getenv("GLC_SLOT_IDENTITY_LINE"),
         )
 
 
@@ -130,15 +119,19 @@ def _endpoint(result: Any) -> str | None:
     return None
 
 
-async def ask_agent_via_http(text: str, *, config: BridgeConfig) -> str:
-    async with httpx.AsyncClient(timeout=config.agent_timeout_s) as client:
-        response = await client.post(config.agent_url, json={"text": text})
-    response.raise_for_status()
-    payload = response.json()
-    answer = payload.get("answer")
-    if isinstance(answer, str) and answer.strip():
-        return answer
-    return "(the EAG3-09 agent returned an empty answer)"
+async def relay_via_gateway(
+    message: ChannelIngress, *, config: BridgeConfig
+) -> ChannelReply | dict[str, Any]:
+    """Send provider facts to the trusted gateway and return its decision."""
+    if not config.slot_identity:
+        raise RuntimeError("GLC_SLOT_IDENTITY_LINE is not configured")
+    headers = {"Authorization": f"Bearer {config.slot_identity}"}
+    async with websockets.connect(config.gateway_ws_url, additional_headers=headers) as websocket:
+        await websocket.send(message.model_dump_json())
+        payload = json.loads(await websocket.recv())
+    if "error" in payload or payload.get("status") == 429:
+        return payload
+    return ChannelReply.model_validate(payload)
 
 
 async def handle_text_event(
@@ -147,66 +140,31 @@ async def handle_text_event(
     event: dict[str, Any],
     destination: str | None,
     config: BridgeConfig,
-    ask_agent: AskAgent,
+    relay_gateway: RelayGateway,
 ) -> dict[str, Any]:
     message = await adapter.on_message({"destination": destination, "events": [event]})
     if message is None:
         print("[line] inbound dropped before relay", flush=True)
         return {"agent_called": False, "dropped": True}
 
-    print(
-        f"[line] inbound user_id={message.channel_user_id} trust={message.trust_level} text={message.text!r}",
-        flush=True,
-    )
+    print(f"[line] inbound user_id={message.channel_user_id} text={message.text!r}", flush=True)
 
-    if message.trust_level == "untrusted":
-        result = await adapter.send(
-            ChannelReply(
-                channel="line",
-                channel_user_id=message.channel_user_id,
-                text=config.not_paired_text,
-            )
-        )
+    decision = await relay_gateway(message)
+    if isinstance(decision, dict):
         return {
             "user_id": message.channel_user_id,
-            "trust_level": message.trust_level,
-            "agent_called": False,
-            "not_paired": True,
-            "reply_status": _status(result),
-            "reply_endpoint": _endpoint(result),
+            "gateway_called": True,
+            "dropped": "error" in decision,
+            "rate_limited": decision.get("status") == 429,
+            "gateway_result": decision,
         }
 
-    ack_result = await adapter.send(
-        ChannelReply(channel="line", channel_user_id=message.channel_user_id, text=config.ack_text)
-    )
-    ack_status = _status(ack_result)
-    if ack_status == 429:
-        return {
-            "user_id": message.channel_user_id,
-            "trust_level": message.trust_level,
-            "agent_called": False,
-            "ack_status": ack_status,
-            "ack_endpoint": _endpoint(ack_result),
-            "rate_limited": True,
-        }
-
-    try:
-        answer = await ask_agent(message.text or "")
-    except Exception as exc:
-        print(f"[agent] error: {exc!r}", flush=True)
-        answer = config.agent_unavailable_text
-
-    answer_result = await adapter.send(
-        ChannelReply(channel="line", channel_user_id=message.channel_user_id, text=answer)
-    )
+    reply_result = await adapter.send(decision)
     return {
         "user_id": message.channel_user_id,
-        "trust_level": message.trust_level,
-        "agent_called": answer != config.agent_unavailable_text,
-        "ack_status": ack_status,
-        "ack_endpoint": _endpoint(ack_result),
-        "answer_status": _status(answer_result),
-        "answer_endpoint": _endpoint(answer_result),
+        "gateway_called": True,
+        "reply_status": _status(reply_result),
+        "reply_endpoint": _endpoint(reply_result),
     }
 
 
@@ -214,7 +172,7 @@ def create_app(
     *,
     config: BridgeConfig | None = None,
     transport: Any | None = None,
-    ask_agent: AskAgent | None = None,
+    relay_gateway: RelayGateway | None = None,
 ) -> FastAPI:
     config = config or BridgeConfig.from_env()
     if transport is None and config.access_token:
@@ -230,7 +188,7 @@ def create_app(
         return {
             "ok": True,
             "line_configured": bool(config.channel_secret and transport is not None),
-            "agent_url": config.agent_url,
+            "gateway_configured": bool(config.slot_identity and config.gateway_ws_url),
         }
 
     async def _line_webhook(request: Request, x_line_signature: str | None) -> dict[str, Any]:
@@ -251,13 +209,13 @@ def create_app(
             print("[line] webhook verification ping: no events", flush=True)
             return {"ok": True, "events": 0, "handled": 0, "skipped": 0, "results": []}
 
-        agent_fn = ask_agent
-        if agent_fn is None:
+        gateway_fn = relay_gateway
+        if gateway_fn is None:
 
-            async def default_agent_fn(text: str) -> str:
-                return await ask_agent_via_http(text, config=config)
+            async def default_gateway_fn(message: ChannelIngress) -> ChannelReply | dict[str, Any]:
+                return await relay_via_gateway(message, config=config)
 
-            agent_fn = default_agent_fn
+            gateway_fn = default_gateway_fn
 
         handled = 0
         skipped = 0
@@ -276,7 +234,7 @@ def create_app(
                     event=event,
                     destination=raw.get("destination"),
                     config=config,
-                    ask_agent=agent_fn,
+                    relay_gateway=gateway_fn,
                 )
             )
 

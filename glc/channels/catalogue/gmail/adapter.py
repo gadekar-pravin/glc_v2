@@ -9,7 +9,7 @@ Group 6 — modular structure (task specs: Tasks/README.md):
   Person 7 (Shrey):          on_message() orchestrator
   Person 8 (Shwetha):        _format_reply()
   Person 9 (Rajan):          send()
-  Person 10 (Vishy):         _resolve_trust_level(), _check_allowlist(), _handle_rate_limit()
+  Person 10 (Vishy):         _handle_rate_limit()
 """
 
 from __future__ import annotations
@@ -31,10 +31,7 @@ from glc.channels.catalogue.gmail.schemas import (
     PubSubMessageData,
     PubSubPushNotification,
 )
-from glc.channels.envelope import Attachment, ChannelMessage, ChannelReply
-from glc.security.allowlists import allowed
-from glc.security.pairing import get_pairing_store
-from glc.security.trust_level import TrustLevel, classify
+from glc.channels.envelope import Attachment, ChannelIngress, ChannelReply
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +113,7 @@ class Adapter(ChannelAdapter):
     # Person 7 (Shrey): on_message() — main orchestrator
     # ──────────────────────────────────────────────────────────────────
 
-    async def on_message(self, raw: Any) -> ChannelMessage | None:  # type: ignore[override]
+    async def on_message(self, raw: Any) -> ChannelIngress | None:  # type: ignore[override]
         client = self._get_client()
 
         # Person 10 (Vishy): handle disconnect
@@ -131,7 +128,7 @@ class Adapter(ChannelAdapter):
         if not message_ids:
             return None  # type: ignore[return-value]
 
-        # Process the first message (one ChannelMessage per on_message call).
+        # Process the first message (one ChannelIngress per on_message call).
         # If multiple messages arrived simultaneously, the caller should
         # use on_messages() to get all of them, or call on_message per push.
         msg_id, thread_id = message_ids[0]
@@ -147,32 +144,25 @@ class Adapter(ChannelAdapter):
         from_addr_raw = email_msg["From"] or ""
         from_addr = self._extract_email(from_addr_raw)
 
-        # Person 10: resolve trust level — tags the message for the policy engine.
-        # In normal mode, all messages are delivered with their trust tag.
-        # In public channel mode, the adapter consults the allowlist before
-        # processing strangers (mention_only_in_public default), so untrusted
-        # senders are dropped at the adapter level to avoid flooding the agent.
-        trust_level = self._resolve_trust_level(from_addr)
-
-        if self.config.get("is_public_channel") and not self._check_allowlist(from_addr, trust_level):
-            return None  # type: ignore[return-value]
-
         # Person 6: parse body and attachments
         text_body = self._extract_text_plain(email_msg)
         attachments = self._extract_attachments(email_msg)
 
-        return ChannelMessage(
+        return ChannelIngress(
             channel="gmail",
             channel_user_id=from_addr,
             user_handle=from_addr,
             text=text_body,
             attachments=attachments,
             thread_id=thread_id,
-            trust_level=trust_level,
             arrived_at=datetime.now(UTC),
+            metadata={
+                "is_public_channel": bool(self.config.get("is_public_channel", False)),
+                "was_mentioned": False,
+            },
         )
 
-    async def on_messages(self, raw: Any) -> list[ChannelMessage]:
+    async def on_messages(self, raw: Any) -> list[ChannelIngress]:
         """Process a Pub/Sub push that may contain multiple new messages.
 
         Unlike on_message() which returns only the first, this returns
@@ -189,7 +179,7 @@ class Adapter(ChannelAdapter):
         if not message_ids:
             return []
 
-        results: list[ChannelMessage] = []
+        results: list[ChannelIngress] = []
         for msg_id, thread_id in message_ids:
             raw_bytes = self._fetch_message(msg_id, client)
             if raw_bytes is None:
@@ -200,24 +190,22 @@ class Adapter(ChannelAdapter):
             from_addr_raw = email_msg["From"] or ""
             from_addr = self._extract_email(from_addr_raw)
 
-            trust_level = self._resolve_trust_level(from_addr)
-
-            if self.config.get("is_public_channel") and not self._check_allowlist(from_addr, trust_level):
-                continue
-
             text_body = self._extract_text_plain(email_msg)
             attachments = self._extract_attachments(email_msg)
 
             results.append(
-                ChannelMessage(
+                ChannelIngress(
                     channel="gmail",
                     channel_user_id=from_addr,
                     user_handle=from_addr,
                     text=text_body,
                     attachments=attachments,
                     thread_id=thread_id,
-                    trust_level=trust_level,
                     arrived_at=datetime.now(UTC),
+                    metadata={
+                        "is_public_channel": bool(self.config.get("is_public_channel", False)),
+                        "was_mentioned": False,
+                    },
                 )
             )
 
@@ -447,40 +435,8 @@ class Adapter(ChannelAdapter):
         return base64.urlsafe_b64encode(raw_bytes).decode().rstrip("=")
 
     # ──────────────────────────────────────────────────────────────────
-    # Person 10 (Vishy): Trust level + error handling helpers
+    # Person 10 (Vishy): Error handling helper
     # ──────────────────────────────────────────────────────────────────
-
-    def _resolve_trust_level(self, sender_email: str) -> TrustLevel:
-        """Determine trust level using the pairing store.
-
-        Returns:
-            'owner_paired' if sender is the channel owner
-            'user_paired' if sender is a paired user
-            'untrusted' for unknown senders
-        """
-        return classify("gmail", sender_email)
-
-    def _check_allowlist(self, sender_email: str, trust_level: str) -> bool:
-        """Check if a sender may be processed in a public channel.
-
-        Consults the canonical per-channel allowlist
-        (`glc.security.allowlists.allowed`), which reads `allowed_senders`
-        and `mention_only_in_public` from channels.yaml. Owners and paired
-        users always pass; unknown senders pass only if explicitly
-        allowlisted.
-
-        Returns:
-            True if the message should be processed, False to drop.
-        """
-        owner_ids = [p.channel_user_id for p in get_pairing_store().owners(channel="gmail")]
-        ok, _why = allowed(
-            "gmail",
-            sender_email,
-            owner_ids=owner_ids,
-            is_public_channel=True,
-            was_mentioned=trust_level in ("owner_paired", "user_paired"),
-        )
-        return ok
 
     def _handle_rate_limit(self, response: Any) -> None:
         """Check if Gmail API returned 429 and log a warning.

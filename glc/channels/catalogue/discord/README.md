@@ -8,7 +8,7 @@ to make the test suite at `tests/channels/test_discord.py` pass.
 Two files under this directory:
 
 - `adapter.py` — subclass `glc.channels.base.ChannelAdapter` and implement
-  `on_message(raw) -> ChannelMessage` and `send(reply) -> Any`.
+  `on_message(raw) -> ChannelIngress` and `send(reply) -> Any`.
 - `schemas.py` — any channel-specific Pydantic types you need.
 
 ## Required environment variables
@@ -27,13 +27,13 @@ Discord delivers events over a heartbeated WebSocket gateway. Embeds and compone
 
 The failing tests live at `tests/channels/test_discord.py`. They cover:
 
-1. `on_message` builds a valid `ChannelMessage` for owner and stranger inputs.
-2. Trust level resolves to `owner_paired` / `user_paired` / `untrusted` correctly.
+1. `on_message` builds a valid `ChannelIngress` from provider-owned facts.
+2. The adapter leaves trust unset; the authenticated gateway classifies the sender.
 3. `send` produces a valid wire-format payload and reaches the mock.
 4. The adapter handles forced disconnects without raising.
 5. Rate-limit responses propagate to the caller as a 429.
-6. In public channels with the default `mention_only_in_public: true`, the
-   adapter consults the allowlist before processing strangers.
+6. Public-channel and mention context is emitted as metadata so the gateway can
+   apply its authoritative allowlist.
 
 The mock-API fake at `tests/channels/mocks/discord_mock.py` is your contract
 surface. Do **not** edit the mock or the test file — they are fixed.

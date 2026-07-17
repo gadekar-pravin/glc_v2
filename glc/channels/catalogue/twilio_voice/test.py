@@ -23,7 +23,7 @@ import pytest
 from glc.channels.catalogue.twilio_voice import audio as tv_audio
 from glc.channels.catalogue.twilio_voice import signature as tv_sig
 from glc.channels.catalogue.twilio_voice.adapter import Adapter
-from glc.channels.envelope import ChannelMessage, ChannelReply
+from glc.channels.envelope import ChannelIngress, ChannelReply
 from glc.security.pairing import get_pairing_store
 from glc.voice.stt.base import TranscribeResult
 from tests.channels.mocks.twilio_voice_mock import (
@@ -32,6 +32,7 @@ from tests.channels.mocks.twilio_voice_mock import (
     STREAM_SID,
     TwilioVoiceMock,
 )
+from tests.pairing_helpers import pair_owner as seed_owner
 
 ADAPTER_LOGGER = "glc.channels.catalogue.twilio_voice.adapter"
 
@@ -66,7 +67,7 @@ def mock():
 
 @pytest.fixture
 def owner_paired():
-    get_pairing_store().force_pair_owner("twilio_voice", OWNER_ID, user_handle="owner")
+    seed_owner(get_pairing_store(), "twilio_voice", OWNER_ID, user_handle="owner")
     return OWNER_ID
 
 
@@ -124,11 +125,11 @@ async def test_inbound_owner_call_builds_full_envelope(mock, owner_paired):
     adapter = Adapter(config={"mock": mock})
     msg = await adapter.on_message(mock.queue_owner_message("ringing"))
 
-    assert isinstance(msg, ChannelMessage)
+    assert isinstance(msg, ChannelIngress)
     assert msg.channel == "twilio_voice"
     assert msg.channel_user_id == OWNER_ID
     assert msg.user_handle == "owner"  # from CallerName, not the phone number
-    assert msg.trust_level == "owner_paired"
+    assert msg.trust_level is None
     assert msg.text is None  # a call webhook carries no speech
     assert msg.metadata["call_stage"] == "ringing"
     assert isinstance(msg.arrived_at, datetime)
@@ -149,7 +150,7 @@ async def test_inbound_missing_caller_id_collapses_to_untrusted(mock):
     # A malformed webhook with no `From` must not raise.
     msg = await adapter.on_message(_call_event(from_phone=None))
     assert msg.channel_user_id == ""
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
 
 
 async def test_inbound_terminal_status_is_flagged_lifecycle(mock, owner_paired):
@@ -169,7 +170,7 @@ async def test_trust_stranger_is_untrusted(mock):
     adapter = Adapter(config={"mock": mock})
     msg = await adapter.on_message(mock.queue_stranger_message("ringing"))
     assert msg.channel_user_id == STRANGER_ID
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
 
 
 async def test_trust_paired_user_is_user_paired(mock):
@@ -180,7 +181,7 @@ async def test_trust_paired_user_is_user_paired(mock):
 
     adapter = Adapter(config={"mock": mock})
     msg = await adapter.on_message(mock.queue_stranger_message("ringing"))
-    assert msg.trust_level == "user_paired"
+    assert msg.trust_level is None
 
 
 # --------------------------------------------------------------------------
@@ -196,7 +197,7 @@ async def test_media_frame_transcribes_and_persists(mock, owner_paired):
 
     msg = await adapter.on_message(mock.queue_media_frame(audio_bytes=b"\xff\x7f" * 100))
     assert msg.channel_user_id == OWNER_ID  # resolved from the per-stream registry
-    assert msg.trust_level == "owner_paired"
+    assert msg.trust_level is None
     assert msg.text == mock.transcription_text
     assert msg.voice_audio_ref is not None
     assert msg.voice_audio_ref.startswith("art:")
@@ -235,7 +236,7 @@ async def test_media_unknown_stream_falls_back_to_untrusted(mock, owner_paired):
     adapter = Adapter(config={"mock": mock})
     msg = await adapter.on_message(_media_event("never-started"))
     assert msg.channel_user_id == ""
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
     assert msg.voice_audio_ref.startswith("art:")  # audio still captured
 
 
@@ -248,7 +249,7 @@ async def test_stream_start_registers_caller(mock, owner_paired):
     adapter = Adapter(config={"mock": mock})
     msg = await adapter.on_message(_start_event(STREAM_SID, OWNER_ID, "owner"))
     assert msg.channel_user_id == OWNER_ID
-    assert msg.trust_level == "owner_paired"
+    assert msg.trust_level is None
     assert msg.metadata["call_stage"] == "answered"
 
 
@@ -263,9 +264,9 @@ async def test_concurrent_streams_do_not_clobber(mock, owner_paired):
     msg_a = await adapter.on_message(_media_event("streamA"))
 
     assert msg_a.channel_user_id == OWNER_ID
-    assert msg_a.trust_level == "owner_paired"
+    assert msg_a.trust_level is None
     assert msg_b.channel_user_id == STRANGER_ID
-    assert msg_b.trust_level == "untrusted"
+    assert msg_b.trust_level is None
 
 
 async def test_stream_stop_evicts_caller(mock, owner_paired):
@@ -276,7 +277,7 @@ async def test_stream_stop_evicts_caller(mock, owner_paired):
     # After stop, the stream is forgotten — a stray frame is unattributed.
     msg = await adapter.on_message(_media_event("streamX"))
     assert msg.channel_user_id == ""
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
 
 
 # --------------------------------------------------------------------------
@@ -288,7 +289,7 @@ async def test_disconnect_is_handled_cleanly(mock, owner_paired):
     adapter = Adapter(config={"mock": mock})
     mock.force_disconnect()
     msg = await adapter.on_message(mock.queue_owner_message("ringing"))
-    assert isinstance(msg, ChannelMessage)
+    assert isinstance(msg, ChannelIngress)
     assert msg.metadata.get("reconnect") is True
 
 
@@ -326,8 +327,7 @@ async def test_outbound_rate_limit_propagates_429(mock, owner_paired):
     assert result.get("status") == 429 or result.get("code") == 20429
 
 
-async def test_outbound_soft_note_guard_logs_but_does_not_block(mock, caplog):
-    # STRANGER_ID is not paired -> the guard should warn but still send.
+async def test_outbound_send_does_not_consult_pairing(mock, caplog):
     adapter = Adapter(config={"mock": mock})
     reply = ChannelReply(channel="twilio_voice", channel_user_id=STRANGER_ID, text="hi")
 
@@ -335,9 +335,7 @@ async def test_outbound_soft_note_guard_logs_but_does_not_block(mock, caplog):
         result = await adapter.send(reply)
 
     rendered = " ".join(r.getMessage() for r in caplog.records)
-    assert "non-paired recipient" in rendered
-    assert STRANGER_ID not in rendered, "full phone number must never be logged (PII)"
-    assert "***" in rendered  # redacted form
+    assert "non-paired recipient" not in rendered
     assert len(mock.send_log) == 1  # not blocked
     assert result.get("status") == 200
 
@@ -471,8 +469,8 @@ async def test_malformed_media_frame_does_not_raise(mock):
     # it collapses to an untrusted, caller-less envelope flagged for audit.
     adapter = Adapter(config={"mock": mock})
     msg = await adapter.on_message({"event": "media", "streamSid": "sX"})
-    assert isinstance(msg, ChannelMessage)
-    assert msg.trust_level == "untrusted"
+    assert isinstance(msg, ChannelIngress)
+    assert msg.trust_level is None
     assert msg.channel_user_id == ""
     assert msg.metadata["malformed_frame"] is True
     assert msg.metadata["frame_event"] == "media"
@@ -487,7 +485,7 @@ async def test_malformed_base64_payload_becomes_empty_audio(mock, owner_paired):
 
     bad = {"event": "media", "streamSid": STREAM_SID, "media": {"payload": "not_valid_base64!!!"}}
     msg = await adapter.on_message(bad)
-    assert isinstance(msg, ChannelMessage)
+    assert isinstance(msg, ChannelIngress)
     assert msg.metadata["malformed_audio"] is True
     assert msg.voice_audio_ref.startswith("art:")  # still persisted (empty WAV)
     assert msg.channel_user_id == OWNER_ID  # frame itself was well-formed
@@ -496,7 +494,7 @@ async def test_malformed_base64_payload_becomes_empty_audio(mock, owner_paired):
 async def test_malformed_start_frame_does_not_raise(mock):
     adapter = Adapter(config={"mock": mock})
     msg = await adapter.on_message({"event": "start"})  # missing `start` body
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
     assert msg.metadata["malformed_frame"] is True
     assert msg.metadata["frame_event"] == "start"
 
@@ -504,7 +502,7 @@ async def test_malformed_start_frame_does_not_raise(mock):
 async def test_malformed_stop_frame_does_not_raise(mock):
     adapter = Adapter(config={"mock": mock})
     msg = await adapter.on_message({"event": "stop"})  # missing `streamSid`
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
     assert msg.metadata["malformed_frame"] is True
     assert msg.metadata["frame_event"] == "stop"
 
@@ -623,7 +621,7 @@ async def test_event_hook_failure_never_breaks_the_call(mock, owner_paired):
     adapter = Adapter(config={"mock": mock, "event_hook": boom})
     # A raising hook must be swallowed — the call still produces an envelope.
     msg = await adapter.on_message(_start_event(STREAM_SID, OWNER_ID, "owner"))
-    assert isinstance(msg, ChannelMessage)
+    assert isinstance(msg, ChannelIngress)
     assert msg.channel_user_id == OWNER_ID
 
 
@@ -631,4 +629,4 @@ async def test_no_event_hook_is_a_noop(mock, owner_paired):
     # Default: no hook configured -> behaves exactly as before, no error.
     adapter = Adapter(config={"mock": mock})
     msg = await adapter.on_message(_start_event(STREAM_SID, OWNER_ID, "owner"))
-    assert isinstance(msg, ChannelMessage)
+    assert isinstance(msg, ChannelIngress)

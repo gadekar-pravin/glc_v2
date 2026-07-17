@@ -314,13 +314,13 @@ This proves:
 This uses the JFK WAV as a mic-like WAV event:
 
 ```sh
-env UV_CACHE_DIR=/private/tmp/uv-cache uv run python -c "import asyncio; from pathlib import Path; from glc.channels.catalogue.local_mic.adapter import Adapter; from glc.security.pairing import get_pairing_store; get_pairing_store().force_pair_owner('local_mic', 'owner', user_handle='owner'); audio = Path('/Users/avi/.glc/src/whisper.cpp/samples/jfk.wav').read_bytes(); ev = {'wav_bytes': audio, 'sample_rate': 16000, 'source': 'mic', 'speaker_id': 'owner', 'speaker_handle': 'owner'}; msg = asyncio.run(Adapter(config={'stt_prefer': 'local'}).on_message(ev)); print(msg.channel, msg.channel_user_id, msg.trust_level); print(msg.voice_audio_ref[:16]); print(msg.text)"
+env UV_CACHE_DIR=/private/tmp/uv-cache uv run python -c "import asyncio; from pathlib import Path; from glc.channels.catalogue.local_mic.adapter import Adapter; audio = Path('/Users/avi/.glc/src/whisper.cpp/samples/jfk.wav').read_bytes(); ev = {'wav_bytes': audio, 'sample_rate': 16000, 'source': 'mic', 'speaker_id': 'owner', 'speaker_handle': 'owner'}; msg = asyncio.run(Adapter(config={'stt_prefer': 'local'}).on_message(ev)); print(msg.channel, msg.channel_user_id, 'trust assigned by gateway'); print(msg.voice_audio_ref[:16]); print(msg.text)"
 ```
 
 Observed output:
 
 ```text
-local_mic owner owner_paired
+local_mic owner trust assigned by gateway
 art:59dfb9a4acb3
 And so my fellow Americans ask not what your country can do for you, ask what you can do for your country.
 ```
@@ -357,7 +357,7 @@ ls -lh /tmp/local_mic_demo.wav
 Then run:
 
 ```sh
-env UV_CACHE_DIR=/private/tmp/uv-cache uv run python -c "import asyncio; from pathlib import Path; from glc.channels.catalogue.local_mic.adapter import Adapter; from glc.security.pairing import get_pairing_store; get_pairing_store().force_pair_owner('local_mic', 'owner', user_handle='owner'); audio = Path('/tmp/local_mic_demo.wav').read_bytes(); ev = {'wav_bytes': audio, 'sample_rate': 16000, 'source': 'mic', 'speaker_id': 'owner', 'speaker_handle': 'owner'}; msg = asyncio.run(Adapter(config={'stt_prefer': 'local'}).on_message(ev)); print(msg.channel, msg.channel_user_id, msg.trust_level); print(msg.voice_audio_ref[:16]); print(msg.text)"
+env UV_CACHE_DIR=/private/tmp/uv-cache uv run python -c "import asyncio; from pathlib import Path; from glc.channels.catalogue.local_mic.adapter import Adapter; audio = Path('/tmp/local_mic_demo.wav').read_bytes(); ev = {'wav_bytes': audio, 'sample_rate': 16000, 'source': 'mic', 'speaker_id': 'owner', 'speaker_handle': 'owner'}; msg = asyncio.run(Adapter(config={'stt_prefer': 'local'}).on_message(ev)); print(msg.channel, msg.channel_user_id, 'trust assigned by gateway'); print(msg.voice_audio_ref[:16]); print(msg.text)"
 ```
 
 ## Live Microphone Demo
@@ -391,7 +391,7 @@ hello this is a live local mic demo
 Then run the recorded audio through Local Mic:
 
 ```sh
-env UV_CACHE_DIR=/private/tmp/uv-cache uv run python -c "import asyncio; from pathlib import Path; from glc.channels.catalogue.local_mic.adapter import Adapter; from glc.security.pairing import get_pairing_store; get_pairing_store().force_pair_owner('local_mic', 'owner', user_handle='owner'); audio = Path('/tmp/live_mic.wav').read_bytes(); ev = {'wav_bytes': audio, 'sample_rate': 16000, 'source': 'mic', 'speaker_id': 'owner', 'speaker_handle': 'owner'}; msg = asyncio.run(Adapter(config={'stt_prefer': 'local'}).on_message(ev)); print(msg.channel, msg.channel_user_id, msg.trust_level); print(msg.voice_audio_ref[:16]); print(msg.text)"
+env UV_CACHE_DIR=/private/tmp/uv-cache uv run python -c "import asyncio; from pathlib import Path; from glc.channels.catalogue.local_mic.adapter import Adapter; audio = Path('/tmp/live_mic.wav').read_bytes(); ev = {'wav_bytes': audio, 'sample_rate': 16000, 'source': 'mic', 'speaker_id': 'owner', 'speaker_handle': 'owner'}; msg = asyncio.run(Adapter(config={'stt_prefer': 'local'}).on_message(ev)); print(msg.channel, msg.channel_user_id, 'trust assigned by gateway'); print(msg.voice_audio_ref[:16]); print(msg.text)"
 ```
 
 In the video, narrate:

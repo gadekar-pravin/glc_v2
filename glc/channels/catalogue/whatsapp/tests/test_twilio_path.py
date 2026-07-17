@@ -39,6 +39,7 @@ from glc.channels.catalogue.whatsapp.schemas import (
 from glc.channels.envelope import ChannelReply
 from glc.security.pairing import get_pairing_store
 from tests.channels.mocks.whatsapp_mock import OWNER_ID, STRANGER_ID, WhatsappMock
+from tests.pairing_helpers import pair_owner as seed_owner
 
 
 @pytest.fixture(autouse=True)
@@ -347,7 +348,7 @@ def test_build_twilio_send_payload_empty_text_raises():
 async def test_twilio_inbound_populates_cache_and_send_uses_twilio(monkeypatch):
     adapter = Adapter(config={"mock": WhatsappMock()})
     store = get_pairing_store()
-    store.force_pair_owner("whatsapp", OWNER_ID, user_handle="owner")
+    seed_owner(store, "whatsapp", OWNER_ID, user_handle="owner")
 
     url = "https://example.com/twilio-webhook"
     auth_token = "test_auth_token"
@@ -408,7 +409,7 @@ async def test_twilio_inbound_stranger_is_untrusted(monkeypatch):
     # on_message will return None here — change this to `assert msg is None`.
     assert msg is not None
     assert msg.channel_user_id == STRANGER_ID
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
 
 
 @pytest.mark.asyncio
@@ -438,7 +439,7 @@ async def test_twilio_tampered_signature_is_rejected(monkeypatch):
 async def test_send_falls_back_to_twilio_on_meta_131030_and_caches_provider(monkeypatch):
     adapter = Adapter(config={})
     store = get_pairing_store()
-    store.force_pair_owner("whatsapp", OWNER_ID, user_handle="owner")
+    seed_owner(store, "whatsapp", OWNER_ID, user_handle="owner")
 
     monkeypatch.setenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
 
@@ -472,7 +473,7 @@ async def test_send_falls_back_to_twilio_on_meta_131030_and_caches_provider(monk
 @pytest.mark.asyncio
 async def test_mock_send_falls_back_to_twilio_on_meta_131030_and_caches_provider(monkeypatch):
     store = get_pairing_store()
-    store.force_pair_owner("whatsapp", OWNER_ID, user_handle="owner")
+    seed_owner(store, "whatsapp", OWNER_ID, user_handle="owner")
     monkeypatch.setenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
 
     mock = WhatsappMock()
@@ -503,7 +504,7 @@ async def test_mock_send_falls_back_to_twilio_on_meta_131030_and_caches_provider
 @pytest.mark.asyncio
 async def test_mock_send_does_not_cache_provider_on_error():
     store = get_pairing_store()
-    store.force_pair_owner("whatsapp", OWNER_ID, user_handle="owner")
+    seed_owner(store, "whatsapp", OWNER_ID, user_handle="owner")
 
     mock = WhatsappMock()
 
@@ -523,7 +524,7 @@ async def test_mock_send_does_not_cache_provider_on_error():
 @pytest.mark.asyncio
 async def test_twilio_send_returns_config_error_when_from_env_missing():
     store = get_pairing_store()
-    store.force_pair_owner("whatsapp", OWNER_ID, user_handle="owner")
+    seed_owner(store, "whatsapp", OWNER_ID, user_handle="owner")
     provider_cache[OWNER_ID] = "twilio"
 
     adapter = Adapter(config={"mock": WhatsappMock()})
@@ -545,7 +546,7 @@ async def test_twilio_send_returns_config_error_when_from_env_missing():
 async def test_meta_fallback_returns_config_error_when_twilio_from_env_missing(monkeypatch):
     adapter = Adapter(config={})
     store = get_pairing_store()
-    store.force_pair_owner("whatsapp", OWNER_ID, user_handle="owner")
+    seed_owner(store, "whatsapp", OWNER_ID, user_handle="owner")
 
     async def fake_send_meta(payload):
         return {"error": {"code": "131030", "message": "Recipient phone number not in allowed list"}}
@@ -566,11 +567,12 @@ async def test_meta_fallback_returns_config_error_when_twilio_from_env_missing(m
 
 
 @pytest.mark.asyncio
-async def test_public_stranger_drop_does_not_populate_provider_cache():
+async def test_public_context_is_forwarded_and_provider_is_cached():
     adapter = Adapter(config={"mock": WhatsappMock(), "is_public_channel": True})
     raw = adapter.config["mock"].queue_stranger_message("hi from public")
 
     result = await adapter.on_message(raw)
 
-    assert result is None
-    assert STRANGER_ID not in provider_cache
+    assert result is not None
+    assert result.metadata["is_public_channel"] is True
+    assert provider_cache[STRANGER_ID] == "meta"

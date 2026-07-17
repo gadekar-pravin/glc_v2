@@ -55,6 +55,7 @@ never returns secret values:
 uv run modal run modal_telegram.py
 ```
 
-Expected evidence: all six provider-key presence values are `false`, the first chat request reaches
-the provider boundary (normally 502/503 with mock keys), replay returns 401, cross-tool use returns
-403, and the intended use after that denial still reaches the provider boundary.
+Expected evidence: all six provider-key presence values are `false`, `pairing_api_absent=true`, and
+`forged_owner_rejected=true`. The first chat request reaches the provider boundary (normally 502/503
+with mock keys), replay returns 401, cross-tool use returns 403, and the intended use after that
+denial still reaches the provider boundary.

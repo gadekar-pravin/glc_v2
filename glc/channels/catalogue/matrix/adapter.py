@@ -6,9 +6,9 @@ timeline events. Outbound is the body of
 ``{"msgtype": "m.text", "body": "..."}``.
 
 The adapter translates that wire format to and from the typed
-``ChannelMessage`` / ``ChannelReply`` envelope and never lets the agent
-runtime see a raw Matrix event. Trust level is decided in deterministic
-code via :func:`glc.security.trust_level.classify`, not by the model.
+``ChannelIngress`` / ``ChannelReply`` envelope and never lets the agent
+runtime see a raw Matrix event. The gateway derives trust from its private
+pairing store.
 
 See ``README.md`` and ``docs/ADAPTER_GUIDE.md`` for the workflow.
 """
@@ -21,9 +21,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from glc.channels.base import ChannelAdapter
-from glc.channels.envelope import Attachment, ChannelMessage, ChannelReply
-from glc.security.allowlists import allowed
-from glc.security.trust_level import classify
+from glc.channels.envelope import Attachment, ChannelIngress, ChannelReply
 
 logger = logging.getLogger("glc.matrix.adapter")
 
@@ -51,7 +49,7 @@ class Adapter(ChannelAdapter):
 
     # -- inbound ---------------------------------------------------------
 
-    async def on_message(self, raw: Any) -> ChannelMessage | None:  # type: ignore[override]
+    async def on_message(self, raw: Any) -> ChannelIngress | None:  # type: ignore[override]
         mock = self.config.get("mock")
 
         # A dropped connection must not raise — the gateway keeps the
@@ -67,25 +65,12 @@ class Adapter(ChannelAdapter):
         content = event.get("content") or {}
         msgtype = content.get("msgtype", "")
         sender = event.get("sender", "")
-        trust_level = classify(self.name, sender)
-
-        # Public-channel posture: an unknown, un-mentioned sender is
-        # silently dropped (allowlists default to mention_only_in_public).
-        if self.config.get("is_public_channel"):
-            owner_ids = [sender] if trust_level == "owner_paired" else []
-            ok, _reason = allowed(
-                self.name,
-                sender,
-                owner_ids=owner_ids,
-                is_public_channel=True,
-                was_mentioned=self._was_mentioned(content, self.config.get("bot_mxid")),
-            )
-            if not ok:
-                return None
+        is_public = bool(self.config.get("is_public_channel"))
+        was_mentioned = self._was_mentioned(content, self.config.get("bot_mxid"))
 
         attachments, voice_ref = self._extract_media(content, mock)
 
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=sender,
             user_handle=self._display_name(event, sender),
@@ -93,12 +78,13 @@ class Adapter(ChannelAdapter):
             attachments=attachments,
             voice_audio_ref=voice_ref,
             thread_id=self._thread_id(content) or event.get("room_id"),
-            trust_level=trust_level,
             arrived_at=self._arrived_at(event),
             metadata={
                 "room_id": event.get("room_id"),
                 "event_id": event.get("event_id"),
                 "msgtype": msgtype,
+                "is_public_channel": is_public,
+                "was_mentioned": was_mentioned,
             },
         )
 

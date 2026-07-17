@@ -182,15 +182,14 @@ The Gmail `users.watch()` registration publishes `{emailAddress, historyId}` not
 | `user_paired` | Explicitly paired contacts | Read-only tools |
 | `untrusted` | Everyone else | Policy-restricted, minimal actions |
 
-Trust is resolved from `~/.glc/pairings.sqlite`. The owner is registered on server startup via:
-```python
-store.force_pair_owner("gmail", "owner@gmail.com", user_handle="owner")
-```
-
-Or configure via environment variable:
+Trust is resolved only by the gateway's pairing database. Configure the address for setup guidance:
 ```bash
 export GLC_GMAIL_OWNER="your-email@gmail.com"
 ```
+
+Then use the installation-token-authenticated `POST /v1/control/pair` endpoint with
+`trust_level: "owner_paired"` and confirm the returned code at
+`POST /v1/control/pair/confirm`. The Gmail adapter never opens the pairing database.
 
 ### Artifact Store
 
@@ -207,10 +206,9 @@ Attachments are stored ephemerally at `~/.glc/artifacts/<sha256[:16]>`:
 | `GMAIL_OAUTH_CLIENT_ID` | (none — required for live) | OAuth 2.0 client id used for the token refresh exchange |
 | `GMAIL_OAUTH_CLIENT_SECRET` | (none — required for live) | OAuth 2.0 client secret (never committed; read from env) |
 | `GMAIL_PUBSUB_TOPIC` | `projects/<project>/topics/gmail-notifications` | Fully-qualified Pub/Sub topic for `users.watch()` |
-| `GLC_GMAIL_OWNER` | (none — required) | Owner email for trust pairing |
+| `GLC_GMAIL_OWNER` | (none — optional) | Owner email shown in setup guidance |
 | `GMAIL_BOT_ADDRESS` | `me` | From address in outbound emails |
 | `GLC_ARTIFACTS_DIR` | `~/.glc/artifacts` | Attachment storage directory |
-| `GLC_PAIRING_DB` | `~/.glc/pairings.sqlite` | Trust pairing database path |
 
 See `.env.example` for a copy-paste template. `.env` is gitignored — never commit real secrets.
 
@@ -246,4 +244,3 @@ See `.env.example` for a copy-paste template. `.env` is gitignored — never com
 - Artifact store security (path traversal)
 - Artifact store lifecycle (store → get → remove)
 - Reply header verification (In-Reply-To, References)
-

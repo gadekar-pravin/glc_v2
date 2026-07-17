@@ -11,8 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from glc.channels.base import ChannelAdapter
-from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.security.trust_level import classify
+from glc.channels.envelope import ChannelIngress, ChannelReply
 
 
 class Adapter(ChannelAdapter):
@@ -25,17 +24,16 @@ class Adapter(ChannelAdapter):
         self.mock = self.config.get("mock")
         self.is_public_channel = self.config.get("is_public_channel", False)
 
-    async def on_message(self, raw: Any) -> ChannelMessage | None:
-        """Convert incoming WebSocket frame to ChannelMessage."""
+    async def on_message(self, raw: Any) -> ChannelIngress | None:
+        """Convert incoming WebSocket frame to ChannelIngress."""
 
         # Handle disconnect gracefully
         if self.mock and self.mock.pop_disconnect():
-            return ChannelMessage(
+            return ChannelIngress(
                 channel="webui",
                 channel_user_id="unknown",
                 user_handle="unknown",
                 text="reconnected",
-                trust_level="untrusted",
                 arrived_at=datetime.now(),
                 attachments=[],
                 metadata={},
@@ -62,25 +60,25 @@ class Adapter(ChannelAdapter):
         if not user_id or not text:
             return None
 
-        # Step 4: Determine trust level
-        trust_level = classify("webui", user_id)
-
-        # Step 5: Convert client timestamp (milliseconds) to datetime
+        # Step 4: Convert client timestamp (milliseconds) to datetime
         if client_ts:
             arrived_at = datetime.fromtimestamp(client_ts / 1000.0)
         else:
             arrived_at = datetime.now()
 
-        # Step 6: Create and return ChannelMessage
-        msg = ChannelMessage(
+        # Step 5: Create and return untrusted ingress facts
+        msg = ChannelIngress(
             channel="webui",
             channel_user_id=user_id,
             user_handle=user_handle,
             text=text,
-            trust_level=trust_level,
             arrived_at=arrived_at,
             attachments=attachments,
-            metadata={"session_id": session_id} if session_id else {},
+            metadata={
+                **({"session_id": session_id} if session_id else {}),
+                "is_public_channel": bool(self.is_public_channel),
+                "was_mentioned": bool(raw.get("was_mentioned", False)),
+            },
         )
 
         return msg

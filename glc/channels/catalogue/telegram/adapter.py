@@ -12,10 +12,7 @@ from typing import Any
 import httpx
 
 from glc.channels.base import ChannelAdapter
-from glc.channels.envelope import Attachment, ChannelMessage, ChannelReply
-from glc.security.allowlists import allowed
-from glc.security.pairing import get_pairing_store
-from glc.security.trust_level import classify
+from glc.channels.envelope import Attachment, ChannelIngress, ChannelReply
 
 from .schemas import TelegramUpdate
 
@@ -23,16 +20,15 @@ from .schemas import TelegramUpdate
 class Adapter(ChannelAdapter):
     name = "telegram"
 
-    async def on_message(self, raw: Any) -> ChannelMessage | None:  # type: ignore[override]
+    async def on_message(self, raw: Any) -> ChannelIngress | None:  # type: ignore[override]
         mock = self.config.get("mock")
         if mock is not None:
             if hasattr(mock, "pop_disconnect") and mock.pop_disconnect():
-                return ChannelMessage(
+                return ChannelIngress(
                     channel=self.name,
                     channel_user_id="",
                     user_handle="",
                     text="disconnected",
-                    trust_level="untrusted",
                     arrived_at=datetime.now(UTC),
                 )
 
@@ -55,25 +51,7 @@ class Adapter(ChannelAdapter):
 
         # Get handle/username
         if not user_handle:
-            store = get_pairing_store()
-            rec = store.lookup(self.name, channel_user_id)
-            user_handle = rec.user_handle if rec else channel_user_id
-
-        # Classify trust level
-        trust_level = classify(self.name, channel_user_id)
-
-        # Allowlist check for stranger in public channel
-        if self.config.get("is_public_channel"):
-            owners = [o.channel_user_id for o in get_pairing_store().owners(self.name)]
-            is_allowed, _ = allowed(
-                channel=self.name,
-                channel_user_id=channel_user_id,
-                owner_ids=owners,
-                is_public_channel=True,
-                was_mentioned=bool(self.config.get("was_mentioned", False)),
-            )
-            if not is_allowed:
-                return None
+            user_handle = channel_user_id
 
         # Parse text and photo attachments
         text = message.text or message.caption
@@ -134,13 +112,12 @@ class Adapter(ChannelAdapter):
             "was_mentioned": bool(self.config.get("was_mentioned", False)),
         }
 
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=channel_user_id,
             user_handle=user_handle,
             text=text,
             attachments=attachments,
-            trust_level=trust_level,
             arrived_at=arrived_at,
             metadata=metadata,
         )

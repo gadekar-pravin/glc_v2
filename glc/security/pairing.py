@@ -184,28 +184,6 @@ class PairingStore:
             )
             return cur.rowcount > 0
 
-    def force_pair_owner(
-        self, channel: str, channel_user_id: str, user_handle: str = "owner"
-    ) -> PairingRecord:
-        """Out-of-band pairing for the installation owner. Used by the
-        installer to bootstrap the first owner identity. Not exposed
-        through HTTP."""
-        paired_at = time.time()
-        with _conn() as c:
-            c.execute(
-                """INSERT OR REPLACE INTO pairings
-                   (channel, channel_user_id, user_handle, trust_level, paired_at)
-                   VALUES (?,?,?,?,?)""",
-                (channel, channel_user_id, user_handle, "owner_paired", paired_at),
-            )
-        return PairingRecord(
-            channel=channel,
-            channel_user_id=channel_user_id,
-            user_handle=user_handle,
-            trust_level="owner_paired",
-            paired_at=paired_at,
-        )
-
 
 _singleton: PairingStore | None = None
 

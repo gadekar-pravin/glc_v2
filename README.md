@@ -34,8 +34,8 @@ curl -H "Authorization: Bearer <install_token>" \
   https://<workspace>--glc-v1-gateway-fastapi-app.modal.run/healthz
 ```
 
-The same bearer header is required for channel webhook URLs. Providers that cannot attach it need a
-separately authenticated ingress before those callbacks can be enabled.
+Gateway channel webhook URLs are disabled in every mode. Provider callbacks terminate in isolated
+slot runtimes, which authenticate to the gateway WebSocket with their slot identity.
 
 Configuration and operational read endpoints require the installation token in every environment,
 including local development: `/v1/embedders`, `/v1/cost/by_agent`, `/v1/providers`,

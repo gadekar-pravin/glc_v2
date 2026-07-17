@@ -22,10 +22,7 @@ from typing import Any
 
 from glc.channels.base import ChannelAdapter
 from glc.channels.catalogue.teams.schemas import ADAPTIVE_CARD_CONTENT_TYPE
-from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.security.allowlists import allowed
-from glc.security.pairing import get_pairing_store
-from glc.security.trust_level import classify
+from glc.channels.envelope import ChannelIngress, ChannelReply
 
 _MENTION_RE = re.compile(r"<at>[^<]*</at>\s*")
 
@@ -97,7 +94,7 @@ class Adapter(ChannelAdapter):
         # serviceUrl + conversation_id per sender; needed to address real replies.
         self._conv_cache: dict[str, dict[str, str]] = {}
 
-    async def on_message(self, raw: Any) -> ChannelMessage | None:  # type: ignore[override]
+    async def on_message(self, raw: Any) -> ChannelIngress | None:  # type: ignore[override]
         mock = self.config.get("mock")
 
         # Disconnect signal: log and return None so the gateway can reconnect.
@@ -117,25 +114,13 @@ class Adapter(ChannelAdapter):
         service_url: str = str(raw.get("serviceUrl", ""))
         conversation_id: str = str(conv.get("id", ""))
 
-        trust_level = classify(self.name, user_id)
-
-        # Public channel: gate via allowlists (mention_only_in_public default true).
-        if self.config.get("is_public_channel"):
-            owner_ids = [r.channel_user_id for r in get_pairing_store().owners(self.name)]
-            ok, _ = allowed(
-                self.name,
-                user_id,
-                owner_ids=owner_ids,
-                is_public_channel=True,
-                was_mentioned=_bot_mentioned(raw),
-            )
-            if not ok:
-                return None
-
         # Extract text from plain message or Adaptive Card; strip mention markup.
         raw_text: str = raw.get("text") or ""
         text: str | None = _MENTION_RE.sub("", raw_text).strip() or None
-        metadata: dict[str, Any] = {}
+        metadata: dict[str, Any] = {
+            "is_public_channel": bool(self.config.get("is_public_channel", False)),
+            "was_mentioned": _bot_mentioned(raw),
+        }
 
         for att in raw.get("attachments") or []:
             if att.get("contentType") == ADAPTIVE_CARD_CONTENT_TYPE:
@@ -154,12 +139,11 @@ class Adapter(ChannelAdapter):
         ts_raw: str | None = raw.get("timestamp")
         arrived_at = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")) if ts_raw else datetime.now(UTC)
 
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=user_id,
             user_handle=user_handle,
             text=text,
-            trust_level=trust_level,
             arrived_at=arrived_at,
             thread_id=activity_id,
             metadata=metadata,

@@ -1,17 +1,15 @@
-"""Approach 2 demo webhook server for US-13 (see docs/WEBHOOK_ARCHITECTURE_OPTIONS.md).
+"""Isolated WhatsApp webhook slot demo.
 
-Receives Meta/Twilio's raw HTTP POST directly and calls the WhatsApp adapter's
-on_message()/send() directly. The GLC gateway is NOT in this path — its
-allowlist/rate-limit/audit pipeline is bypassed. That's Approach 3 (out of
-scope: shared glc/routes/channels.py, separate maintainer PR, post-US-15).
+Receives Meta/Twilio's raw HTTP POST, parses it with the adapter, and relays the
+untrusted ingress to the authenticated gateway WebSocket. Pairing, allowlists,
+rate limits, audit, and trust assignment therefore stay in the gateway.
 
 Run from repo root:
     uv run python glc/channels/catalogue/whatsapp/demo_webhook_server.py
 
-Listens on port 8111 by default — same as `glc serve`'s default GLC_PORT,
-since this script and the gateway are mutually exclusive (put this behind
-ngrok and register the public URL + WHATSAPP_VERIFY_TOKEN in the Meta/Twilio
-console).
+Listens on port 8124 by default while the gateway remains on port 8111. Put
+this slot callback behind the provider-facing tunnel; never expose the gateway
+webhook route.
 Reads WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN, WHATSAPP_PHONE_NUMBER_ID,
 WHATSAPP_TOKEN, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM,
 TWILIO_WEBHOOK_URL from .env at the repo root (all read inside adapter.py
@@ -28,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import websockets
 from dotenv import load_dotenv
 
 
@@ -48,9 +47,26 @@ from glc.channels.envelope import ChannelReply  # noqa: E402
 from glc.channels.registry import instantiate  # noqa: E402
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "glc-verify-token-us1")
-PORT = int(os.environ.get("WEBHOOK_PORT", "8111"))
+PORT = int(os.environ.get("WEBHOOK_PORT", "8124"))
 
 adapter = instantiate("whatsapp")
+
+
+async def _gateway_roundtrip(message):
+    identity = os.getenv("GLC_SLOT_IDENTITY_WHATSAPP", "").strip()
+    if not identity:
+        raise RuntimeError("GLC_SLOT_IDENTITY_WHATSAPP is not configured")
+    uri = os.getenv(
+        "GLC_GATEWAY_WS_URL",
+        "ws://127.0.0.1:8111/v1/channels/whatsapp",
+    )
+    headers = {"Authorization": f"Bearer {identity}"}
+    async with websockets.connect(uri, additional_headers=headers) as websocket:
+        await websocket.send(message.model_dump_json())
+        payload = json.loads(await websocket.recv())
+    if "error" in payload or payload.get("status") == 429:
+        return payload
+    return ChannelReply.model_validate(payload)
 
 
 def _classify_drop_reason(raw_body: bytes, headers: dict[str, str]) -> str:
@@ -132,19 +148,13 @@ class Handler(BaseHTTPRequestHandler):
 
         print(
             f"[demo] inbound provider={msg.metadata.get('provider')} "
-            f"from={msg.channel_user_id} trust={msg.trust_level} text={msg.text!r}"
+            f"from={msg.channel_user_id} trust=assigned-by-gateway text={msg.text!r}"
         )
 
-        # S11 stub agent: same echo behaviour as the gateway's own
-        # /v1/channels/{name} endpoint and Approach 3's channel_webhook()
-        # (see INBOUND_WEBHOOK_ARCHITECTURE.md) — the real agent runtime
-        # is still a stub at this stage.
-        reply = ChannelReply(
-            channel=msg.channel,
-            channel_user_id=msg.channel_user_id,
-            text=f"[glc echo] {msg.text or ''}",
-            thread_id=msg.thread_id,
-        )
+        reply = await _gateway_roundtrip(msg)
+        if isinstance(reply, dict):
+            print(f"[demo] gateway decision: {reply}")
+            return
         result = await adapter.send(reply)
         print(f"[demo] send() result: {result}")
 
@@ -155,8 +165,5 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"[demo] Approach 2 (US-13) server listening on port {PORT}")
     print(f"[demo] VERIFY_TOKEN = {VERIFY_TOKEN!r}")
-    print(
-        "[demo] gateway is NOT in this path (Approach 3 territory) - "
-        "calls adapter.on_message()/adapter.send() directly"
-    )
+    print("[demo] provider events are relayed through the authenticated gateway WebSocket")
     HTTPServer(("", PORT), Handler).serve_forever()

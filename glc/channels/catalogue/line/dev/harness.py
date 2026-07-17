@@ -1,10 +1,10 @@
 """Deterministic end-to-end harness for the LINE adapter.
 
-Replaces the manual "type a message on your phone through a tunnel" step from
-RESTART_RUNBOOK.md with a scripted, repeatable driver. It pushes synthetic LINE
-webhooks through the *real* relay (signature verify -> Adapter -> trust check ->
-ack/agent/answer -> outbound) with a canned agent, so the bot's behaviour is
-reproducible.
+Replaces the manual "type a message on your phone through a tunnel" step with a
+scripted, repeatable driver. It pushes synthetic LINE webhooks through the real
+slot relay (signature verification -> Adapter -> gateway boundary -> outbound).
+The offline gateway stub returns decisions; it never asks the adapter to assign
+trust.
 
 Two modes:
 
@@ -40,16 +40,13 @@ import httpx
 
 from glc.channels.catalogue.line.adapter import Adapter
 from glc.channels.catalogue.line.dev.live_bridge import (
-    DEFAULT_ACK_TEXT,
-    DEFAULT_AGENT_UNAVAILABLE_TEXT,
-    DEFAULT_NOT_PAIRED_TEXT,
+    DEFAULT_GATEWAY_WS_URL,
     BridgeConfig,
     RealLineTransport,
     create_app,
     line_signature,
 )
-from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.security import pairing
+from glc.channels.envelope import ChannelIngress, ChannelReply
 
 CAPTURE_SECRET = "harness-capture-secret"  # not a credential; signs synthetic offline webhooks
 STRANGER_ID = "Ustranger_harness"
@@ -85,6 +82,20 @@ DEMO_CONVERSATION = list(_CANNED_ANSWERS)
 async def stub_agent(text: str) -> str:
     """Deterministic stand-in for the EAG3-09 agent."""
     return _CANNED_ANSWERS.get(text.strip(), f"[canned] You said: {text.strip()}")
+
+
+async def stub_gateway(message: ChannelIngress) -> ChannelReply | dict[str, Any]:
+    """Offline stand-in for gateway decisions; trust is never returned to the slot."""
+    if message.channel_user_id == STRANGER_ID:
+        return {"error": "dropped: not_owner"}
+    if message.text == "trigger a 429":
+        return {"status": 429, "error": "rate limited"}
+    return ChannelReply(
+        channel="line",
+        channel_user_id=message.channel_user_id,
+        text=await stub_agent(message.text or ""),
+        thread_id=message.thread_id,
+    )
 
 
 @dataclass
@@ -165,7 +176,7 @@ async def _run_through_bridge(
 ) -> dict[str, Any]:
     """POST a signed synthetic webhook at the in-process bridge, return the
     relay's first per-event result dict."""
-    app = create_app(config=config, transport=transport, ask_agent=stub_agent)
+    app = create_app(config=config, transport=transport, relay_gateway=stub_gateway)
     raw = json.dumps(body, separators=(",", ":")).encode("utf-8")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://harness") as client:
         resp = await client.post(
@@ -194,21 +205,15 @@ async def scenario_owner(ctx: Ctx) -> Outcome:
     result = await _run_through_bridge(ctx.config, transport, body, ctx.secret)
 
     checks: list[tuple[str, bool]] = [
-        ("trust=owner_paired", result.get("trust_level") == "owner_paired"),
-        ("agent_called", result.get("agent_called") is True),
+        ("gateway called", result.get("gateway_called") is True),
     ]
     if ctx.mode == "capture":
         log = transport.send_log
-        checks.append(("2 outbound payloads", len(log) == 2))
-        checks.append(("ack uses replyToken", bool(log) and "replyToken" in log[0]))
-        checks.append(
-            ("answer falls back to push", len(log) > 1 and "to" in log[1] and "replyToken" not in log[1])
-        )
+        checks.append(("1 outbound payload", len(log) == 1))
+        checks.append(("reply uses replyToken", bool(log) and "replyToken" in log[0]))
     else:
-        checks.append(("ack via push", result.get("ack_endpoint") == "/push"))
-        checks.append(("answer via push", result.get("answer_endpoint") == "/push"))
-        checks.append(("ack delivered 200", result.get("ack_status") == 200))
-        checks.append(("answer delivered 200", result.get("answer_status") == 200))
+        checks.append(("reply via push", result.get("reply_endpoint") == "/push"))
+        checks.append(("reply delivered 200", result.get("reply_status") == 200))
     return _summarize("owner", checks, result)
 
 
@@ -224,9 +229,9 @@ async def scenario_conversation(ctx: Ctx) -> Outcome:
         reply_token = None if ctx.mode == "live" else f"rt-harness-conv-{i}"
         body = _webhook(ctx.owner_id, question, reply_token=reply_token)
         result = await _run_through_bridge(ctx.config, transport, body, ctx.secret)
-        ok = result.get("trust_level") == "owner_paired" and result.get("agent_called") is True
+        ok = result.get("gateway_called") is True
         if ctx.mode == "live":
-            ok = ok and result.get("answer_status") == 200
+            ok = ok and result.get("reply_status") == 200
         checks.append((f"q{i + 1} delivered", bool(ok)))
     summary = {"questions": len(DEMO_CONVERSATION), "messages": 2 * len(DEMO_CONVERSATION)}
     return _summarize("conversation", checks, summary)
@@ -252,7 +257,7 @@ async def scenario_answers_only(ctx: Ctx) -> Outcome:
         result = await adapter.send(
             ChannelReply(channel="line", channel_user_id=message.channel_user_id, text=answer)
         )
-        ok = message.trust_level == "owner_paired"
+        ok = isinstance(message, ChannelIngress)
         if ctx.mode == "live":
             ok = ok and isinstance(result, dict) and result.get("status") == 200
         else:
@@ -268,22 +273,20 @@ async def scenario_stranger(ctx: Ctx) -> Outcome:
     body = _webhook(ctx.stranger_id, "hello from a stranger", reply_token=reply_token)
     result = await _run_through_bridge(ctx.config, transport, body, ctx.secret)
     checks = [
-        ("trust=untrusted", result.get("trust_level") == "untrusted"),
-        ("not_paired", result.get("not_paired") is True),
-        ("agent not called", result.get("agent_called") is not True),
+        ("gateway called", result.get("gateway_called") is True),
+        ("gateway dropped", result.get("dropped") is True),
+        ("no outbound", not getattr(transport, "send_log", [])),
     ]
     return _summarize("stranger", checks, result)
 
 
 async def scenario_rate_limit(ctx: Ctx) -> Outcome:
     transport = ctx.make_transport()
-    transport.rate_limited = True
     body = _webhook(ctx.owner_id, "trigger a 429", reply_token="rt-harness-rl")
     result = await _run_through_bridge(ctx.config, transport, body, ctx.secret)
     checks = [
-        ("ack_status=429", result.get("ack_status") == 429),
         ("rate_limited flag", result.get("rate_limited") is True),
-        ("agent not called", result.get("agent_called") is not True),
+        ("no outbound", not transport.send_log),
     ]
     return _summarize("rate_limit", checks, result)
 
@@ -298,7 +301,7 @@ async def scenario_disconnect(ctx: Ctx) -> Outcome:
         return Outcome("disconnect", "FAIL", f"relay raised: {exc!r}")
     checks = [
         ("relay completed", bool(result)),
-        ("trust=owner_paired", result.get("trust_level") == "owner_paired"),
+        ("gateway called", result.get("gateway_called") is True),
     ]
     return _summarize("disconnect", checks, result)
 
@@ -314,8 +317,8 @@ async def scenario_public_stranger(ctx: Ctx) -> Outcome:
         return Outcome("public_stranger", "PASS", f"dropped ({type(exc).__name__})")
     if msg is None:
         return Outcome("public_stranger", "PASS", "dropped")
-    passed = isinstance(msg, ChannelMessage) and msg.trust_level == "untrusted"
-    detail = f"trust_level={getattr(msg, 'trust_level', None)}"
+    passed = isinstance(msg, ChannelIngress) and msg.trust_level is None
+    detail = "adapter emitted provider facts without authoritative trust"
     return Outcome("public_stranger", "PASS" if passed else "FAIL", detail)
 
 
@@ -354,11 +357,8 @@ def _build_config(mode: str) -> BridgeConfig:
     return BridgeConfig(
         access_token=None,
         channel_secret=CAPTURE_SECRET,
-        agent_url="http://127.0.0.1:8200/agent/query",
-        ack_text=DEFAULT_ACK_TEXT,
-        not_paired_text=DEFAULT_NOT_PAIRED_TEXT,
-        agent_unavailable_text=DEFAULT_AGENT_UNAVAILABLE_TEXT,
-        agent_timeout_s=5.0,
+        gateway_ws_url=DEFAULT_GATEWAY_WS_URL,
+        slot_identity="offline-harness-identity",
     )
 
 
@@ -391,12 +391,7 @@ async def _amain(args: argparse.Namespace) -> int:
     assert secret is not None  # guaranteed by _build_config
     owner_id = _owner_id(mode)
 
-    with tempfile.TemporaryDirectory(prefix="glc-line-harness-") as tmp:
-        # Isolate trust lookups in a throwaway DB; never touch ~/.glc/pairings.sqlite.
-        os.environ["GLC_PAIRING_DB"] = os.path.join(tmp, "pairings.sqlite")
-        pairing._singleton = None
-        pairing.get_pairing_store().force_pair_owner("line", owner_id, user_handle="owner")
-
+    with tempfile.TemporaryDirectory(prefix="glc-line-harness-"):
         ctx = Ctx(mode=mode, config=config, secret=secret, owner_id=owner_id)
         names = (
             [args.scenario]

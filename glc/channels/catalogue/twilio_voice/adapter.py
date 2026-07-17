@@ -6,7 +6,7 @@ Wire format: Twilio Programmable Voice TwiML + Media Streams.
     voice WebSocket.
   - Inbound audio -> Media Streams WS frame {event:"media", media:{payload}}
     where payload is base64 mu-law @ 8 kHz. We decode it, transcribe it,
-    persist the bytes to the artifact store, and surface a ChannelMessage.
+    persist the bytes to the artifact store, and surface a ChannelIngress.
   - Outbound       -> TwiML XML returned from the webhook response.
 
 See docs/ADAPTER_GUIDE.md and the README in this directory.
@@ -35,10 +35,7 @@ from glc.channels.catalogue.twilio_voice.schemas import (
     TwilioStreamStopFrame,
 )
 from glc.channels.catalogue.twilio_voice.signature import verify_signature
-from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.security.allowlists import allowed
-from glc.security.pairing import get_pairing_store
-from glc.security.trust_level import classify
+from glc.channels.envelope import ChannelIngress, ChannelReply
 from glc.voice.stt import transcribe as stt_transcribe
 
 logger = logging.getLogger(__name__)
@@ -91,7 +88,7 @@ class Adapter(ChannelAdapter):
         # hook that raises is swallowed so monitoring can never break a call.
         self._event_hook = self.config.get("event_hook")
 
-    async def on_message(self, raw: Any) -> ChannelMessage:
+    async def on_message(self, raw: Any) -> ChannelIngress:
         mock = self.config.get("mock")
 
         # A forced disconnect must be handled gracefully — never raise.
@@ -154,17 +151,6 @@ class Adapter(ChannelAdapter):
         return verify_signature(token or "", url, params, signature)
 
     async def send(self, reply: ChannelReply) -> Any:
-        # Soft-note outbound guard: we only ever reply on the active call, so a
-        # non-paired recipient is not blocked (that would break the reply and
-        # Test 3). We log it so the security posture is visible. Initiating a
-        # *new* outbound call to an unpaired number is a separate path that
-        # must gate on pairing — see README limitations.
-        if classify(self.name, reply.channel_user_id) == "untrusted":
-            logger.warning(
-                "twilio_voice: replying on active call to non-paired recipient %s",
-                _redact(reply.channel_user_id),
-            )
-
         body = {"twiml": self._build_twiml(reply), "to": reply.channel_user_id}
         mock = self.config.get("mock")
         if mock is not None:
@@ -181,7 +167,7 @@ class Adapter(ChannelAdapter):
 
     # -- inbound helpers ----------------------------------------------------
 
-    def _handle_call_webhook(self, raw: Any, *, reconnect: bool) -> ChannelMessage:
+    def _handle_call_webhook(self, raw: Any, *, reconnect: bool) -> ChannelIngress:
         # Validate the untrusted webhook at the boundary. A malformed event
         # (no caller, wrong shape) collapses to an untrusted, caller-less
         # envelope rather than letting bad data into the agent runtime.
@@ -193,22 +179,14 @@ class Adapter(ChannelAdapter):
         from_phone = event.From if event else ""
         handle = (event.CallerName if event else None) or from_phone
 
-        trust = classify(self.name, from_phone)
-
-        # In a public-channel context, consult the allowlist. Strangers stay
-        # untrusted (the agent runtime drops untrusted senders downstream).
-        if self.config.get("is_public_channel"):
-            owners = [r.channel_user_id for r in get_pairing_store().owners(self.name)]
-            ok, _reason = allowed(self.name, from_phone, owner_ids=owners, is_public_channel=True)
-            if not ok:
-                trust = "untrusted"
-
         status = event.CallStatus if event else None
         metadata: dict[str, Any] = {
             "call_sid": event.CallSid if event else None,
             "call_status": status,
             "direction": event.Direction if event else None,
             "call_stage": "ringing",
+            "is_public_channel": bool(self.config.get("is_public_channel", False)),
+            "was_mentioned": bool(self.config.get("was_mentioned", False)),
         }
         # A terminal-status webhook is call lifecycle, not speech — flag it
         # so downstream skips it instead of waiting for audio that won't come.
@@ -217,31 +195,29 @@ class Adapter(ChannelAdapter):
         if reconnect:
             metadata["reconnect"] = True
 
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=from_phone,
             user_handle=handle,
             text=None,
-            trust_level=trust,
             arrived_at=datetime.now(UTC),
             metadata=metadata,
         )
 
-    def _malformed_frame_message(self, frame_event: str) -> ChannelMessage:
+    def _malformed_frame_message(self, frame_event: str) -> ChannelIngress:
         # A frame we could not parse. Mirror the webhook path: never raise on
         # bad input — collapse to an untrusted, caller-less envelope flagged for
         # audit, rather than letting an exception tear down the live call.
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id="",
             user_handle="",
             text=None,
-            trust_level="untrusted",
             arrived_at=datetime.now(UTC),
             metadata={"malformed_frame": True, "frame_event": frame_event},
         )
 
-    def _handle_stream_start(self, raw: dict[str, Any]) -> ChannelMessage:
+    def _handle_stream_start(self, raw: dict[str, Any]) -> ChannelIngress:
         # The stream's caller arrives in customParameters (echoing the values
         # we put on the <Stream> in our TwiML). Register it under streamSid so
         # this call's media frames resolve to the right person.
@@ -253,17 +229,16 @@ class Adapter(ChannelAdapter):
         caller = params.get("caller", "")
         handle = params.get("handle") or caller
         self._stream_callers[frame.start.streamSid] = {"id": caller, "handle": handle}
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=caller,
             user_handle=handle or caller,
             text=None,
-            trust_level=classify(self.name, caller),
             arrived_at=datetime.now(UTC),
             metadata={"stream_sid": frame.start.streamSid, "call_stage": "answered"},
         )
 
-    async def _handle_stream_stop(self, raw: dict[str, Any], mock: Any = None) -> ChannelMessage:
+    async def _handle_stream_stop(self, raw: dict[str, Any], mock: Any = None) -> ChannelIngress:
         # Evict the stream's caller so a long-lived process doesn't leak one
         # dict entry per call forever.
         try:
@@ -282,12 +257,11 @@ class Adapter(ChannelAdapter):
         self._stream_buffers.pop(frame.streamSid, None)
         caller = self._stream_callers.pop(frame.streamSid, {})
         caller_id = caller.get("id", "")
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=caller_id,
             user_handle=caller.get("handle") or caller_id,
             text=None,
-            trust_level=classify(self.name, caller_id),
             arrived_at=datetime.now(UTC),
             metadata={"stream_sid": frame.streamSid, "call_stage": "completed", "lifecycle": True},
         )
@@ -303,9 +277,9 @@ class Adapter(ChannelAdapter):
         except Exception as exc:  # keep the audio; report the failure
             return None, str(exc)
 
-    async def _flush_buffer(self, stream_sid: str | None, mock: Any, *, stage: str) -> ChannelMessage:
+    async def _flush_buffer(self, stream_sid: str | None, mock: Any, *, stage: str) -> ChannelIngress:
         """Convert a stream's buffered mu-law into one WAV, persist it, transcribe
-        it once, and return the resulting ChannelMessage. Clears the buffer."""
+        it once, and return the resulting ChannelIngress. Clears the buffer."""
         key = stream_sid or ""
         buf = self._stream_buffers.pop(key, bytearray())
         caller = self._stream_callers.get(key, {})
@@ -323,18 +297,17 @@ class Adapter(ChannelAdapter):
         elif text == "":
             metadata["empty_transcript"] = True
 
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=caller_id,
             user_handle=handle or caller_id,
             text=text,
             voice_audio_ref=ref,
-            trust_level=classify(self.name, caller_id),
             arrived_at=datetime.now(UTC),
             metadata=metadata,
         )
 
-    async def _handle_media_frame(self, raw: dict[str, Any], mock: Any) -> ChannelMessage:
+    async def _handle_media_frame(self, raw: dict[str, Any], mock: Any) -> ChannelIngress:
         # Validate the frame before touching its bytes. A malformed frame
         # collapses to an untrusted, caller-less envelope instead of raising.
         try:
@@ -375,12 +348,11 @@ class Adapter(ChannelAdapter):
             }
             if decode_failed:
                 metadata["malformed_audio"] = True
-            return ChannelMessage(
+            return ChannelIngress(
                 channel=self.name,
                 channel_user_id=caller_id,
                 user_handle=handle or caller_id,
                 text=None,
-                trust_level=classify(self.name, caller_id),
                 arrived_at=datetime.now(UTC),
                 metadata=metadata,
             )
@@ -405,13 +377,12 @@ class Adapter(ChannelAdapter):
             # We heard the caller but got no words (silence/noise).
             metadata["empty_transcript"] = True
 
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=caller_id,
             user_handle=handle or caller_id,
             text=text,
             voice_audio_ref=ref,
-            trust_level=classify(self.name, caller_id),
             arrived_at=datetime.now(UTC),
             metadata=metadata,
         )

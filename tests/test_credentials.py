@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,7 +19,14 @@ from glc.main import create_app
 
 @pytest.fixture
 def credential_client(monkeypatch, tmp_path):
+    import glc.security.allowlists as allowlists
+
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "gateway.sqlite"))
+    monkeypatch.setattr(
+        allowlists,
+        "load_channels",
+        lambda: {"channels": {"telegram": {"enabled": True, "allowed_senders": []}}},
+    )
     monkeypatch.setenv("GLC_CREDS_SIGNING_KEY", "test-signing-key-not-a-provider-key")
     monkeypatch.setenv("GLC_SLOT_IDENTITY_TELEGRAM", "telegram-identity")
     monkeypatch.setenv("GLC_SLOT_IDENTITY_LOCAL_MIC", "local-mic-identity")
@@ -126,6 +134,88 @@ def test_slot_identity_authenticates_only_its_matching_websocket(credential_clie
         with credential_client.websocket_connect("/v1/channels/discord", headers=headers) as websocket:
             websocket.receive_text()
     assert rejected.value.code == 1008
+
+
+def _ingress(*, user_id: str, channel: str = "telegram", trust_level: str | None = None) -> dict:
+    payload = {
+        "channel": channel,
+        "channel_user_id": user_id,
+        "user_handle": user_id,
+        "text": "boundary probe",
+        "arrived_at": datetime.now(UTC).isoformat(),
+        "metadata": {"is_public_channel": False, "was_mentioned": False},
+    }
+    if trust_level is not None:
+        payload["trust_level"] = trust_level
+    return payload
+
+
+def _pair_owner(client: TestClient, *, user_id: str, channel: str = "telegram") -> None:
+    from glc.config import get_or_create_install_token
+
+    headers = {"Authorization": f"Bearer {get_or_create_install_token()}"}
+    issued = client.post(
+        "/v1/control/pair",
+        headers=headers,
+        json={
+            "channel": channel,
+            "channel_user_id": user_id,
+            "user_handle": "owner",
+            "trust_level": "owner_paired",
+        },
+    )
+    assert issued.status_code == 200
+    confirmed = client.post(
+        "/v1/control/pair/confirm",
+        headers=headers,
+        json={"code": issued.json()["code"]},
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["trust_level"] == "owner_paired"
+
+
+def test_gateway_ignores_forged_owner_claim(credential_client):
+    headers = {"Authorization": "Bearer telegram-identity"}
+    with credential_client.websocket_connect("/v1/channels/telegram", headers=headers) as websocket:
+        websocket.send_json(_ingress(user_id="attacker-id", trust_level="owner_paired"))
+        response = websocket.receive_json()
+    assert "dropped" in response["error"]
+
+
+def test_gateway_uses_pairing_db_even_when_adapter_claims_untrusted(credential_client):
+    _pair_owner(credential_client, user_id="real-owner")
+    headers = {"Authorization": "Bearer telegram-identity"}
+    with credential_client.websocket_connect("/v1/channels/telegram", headers=headers) as websocket:
+        websocket.send_json(_ingress(user_id="real-owner", trust_level="untrusted"))
+        response = websocket.receive_json()
+    assert "error" not in response, response
+    assert response["channel"] == "telegram"
+    assert response["channel_user_id"] == "real-owner"
+    assert response["text"] == "[glc echo] boundary probe"
+
+
+def test_gateway_normalizes_claimed_channel_to_authenticated_slot(credential_client):
+    _pair_owner(credential_client, user_id="route-owner")
+    headers = {"Authorization": "Bearer telegram-identity"}
+    with credential_client.websocket_connect("/v1/channels/telegram", headers=headers) as websocket:
+        websocket.send_json(_ingress(user_id="route-owner", channel="discord", trust_level="owner_paired"))
+        response = websocket.receive_json()
+    assert "error" not in response, response
+    assert response["channel"] == "telegram"
+
+
+def test_gateway_refreshes_pairings_without_websocket_reconnect(credential_client):
+    headers = {"Authorization": "Bearer telegram-identity"}
+    with credential_client.websocket_connect("/v1/channels/telegram", headers=headers) as websocket:
+        websocket.send_json(_ingress(user_id="late-owner", trust_level="owner_paired"))
+        assert "dropped" in websocket.receive_json()["error"]
+
+        _pair_owner(credential_client, user_id="late-owner")
+
+        websocket.send_json(_ingress(user_id="late-owner"))
+        response = websocket.receive_json()
+        assert "error" not in response, response
+        assert response["text"] == "[glc echo] boundary probe"
 
 
 def test_production_gateway_never_instantiates_webhook_adapters(credential_client):

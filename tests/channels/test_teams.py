@@ -14,9 +14,10 @@ from datetime import datetime
 import pytest
 
 from glc.channels.catalogue.teams.adapter import Adapter
-from glc.channels.envelope import ChannelMessage, ChannelReply
+from glc.channels.envelope import ChannelIngress, ChannelReply
 from glc.security.pairing import get_pairing_store
 from tests.channels.mocks.teams_mock import OWNER_ID, STRANGER_ID, TeamsMock
+from tests.pairing_helpers import pair_owner as seed_owner
 
 
 @pytest.fixture
@@ -27,7 +28,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("teams", OWNER_ID, user_handle="owner")
+    seed_owner(store, "teams", OWNER_ID, user_handle="owner")
     yield
     store.revoke("teams", OWNER_ID)
 
@@ -37,10 +38,10 @@ async def test_on_message_owner_returns_valid_envelope(mock, pair_owner):
     adapter = Adapter(config={"mock": mock})
     ev = mock.queue_owner_message("hello from owner")
     msg = await adapter.on_message(ev)
-    assert isinstance(msg, ChannelMessage)
+    assert isinstance(msg, ChannelIngress)
     assert msg.channel == "teams"
     assert msg.channel_user_id == OWNER_ID
-    assert msg.trust_level == "owner_paired"
+    assert msg.trust_level is None
     assert msg.text == "hello from owner"
     assert isinstance(msg.arrived_at, datetime)
 
@@ -52,7 +53,7 @@ async def test_on_message_stranger_is_untrusted(mock):
     msg = await adapter.on_message(ev)
     assert msg is not None
     assert msg.channel_user_id == STRANGER_ID
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
 
 
 @pytest.mark.asyncio
@@ -98,7 +99,7 @@ async def test_allowlist_silently_drops_stranger_in_public(mock):
     adapter = Adapter(config={"mock": mock, "is_public_channel": True})
     ev = mock.queue_stranger_message("hi from public")
     msg = await adapter.on_message(ev)
-    assert msg is None or msg.trust_level == "untrusted"
+    assert msg is None or msg.trust_level is None
 
 
 @pytest.mark.asyncio
@@ -106,7 +107,7 @@ async def test_channel_specific_behaviour_adaptive_card(mock, pair_owner):
     """Adaptive Cards arrive as `attachments[]` with `contentType ==
     application/vnd.microsoft.card.adaptive`. The adapter must:
       - extract the card's first TextBlock body and put it in
-        ChannelMessage.text
+        ChannelIngress.text
       - stash the raw card JSON under metadata['adaptive_card']
     Adapters that ignore attachments lose the user's intent entirely
     when a Teams user submits a card-form interaction."""

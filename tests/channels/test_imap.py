@@ -15,9 +15,10 @@ from datetime import datetime
 import pytest
 
 from glc.channels.catalogue.imap.adapter import Adapter
-from glc.channels.envelope import ChannelMessage, ChannelReply
+from glc.channels.envelope import ChannelIngress, ChannelReply
 from glc.security.pairing import get_pairing_store
 from tests.channels.mocks.imap_mock import OWNER_ID, STRANGER_ID, ImapMock
+from tests.pairing_helpers import pair_owner as seed_owner
 
 
 @pytest.fixture
@@ -28,7 +29,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("imap", OWNER_ID, user_handle="owner")
+    seed_owner(store, "imap", OWNER_ID, user_handle="owner")
     yield
     store.revoke("imap", OWNER_ID)
 
@@ -38,10 +39,10 @@ async def test_on_message_owner_returns_valid_envelope(mock, pair_owner):
     adapter = Adapter(config={"mock": mock})
     ev = mock.queue_owner_message("hello from owner")
     msg = await adapter.on_message(ev)
-    assert isinstance(msg, ChannelMessage)
+    assert isinstance(msg, ChannelIngress)
     assert msg.channel == "imap"
     assert msg.channel_user_id == OWNER_ID
-    assert msg.trust_level == "owner_paired"
+    assert msg.trust_level is None
     assert "hello from owner" in (msg.text or "")
     assert isinstance(msg.arrived_at, datetime)
 
@@ -53,7 +54,7 @@ async def test_on_message_stranger_is_untrusted(mock):
     msg = await adapter.on_message(ev)
     assert msg is not None
     assert msg.channel_user_id == STRANGER_ID
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
 
 
 @pytest.mark.asyncio
@@ -102,7 +103,7 @@ async def test_allowlist_silently_drops_stranger_in_public(mock):
     adapter = Adapter(config={"mock": mock, "is_public_channel": True})
     ev = mock.queue_stranger_message("hi from public")
     msg = await adapter.on_message(ev)
-    assert msg is None or msg.trust_level == "untrusted"
+    assert msg is None or msg.trust_level is None
 
 
 @pytest.mark.asyncio
@@ -115,7 +116,7 @@ async def test_channel_specific_behaviour_pdf_attachment_to_artifact(mock, pair_
     The attachment bytes must land in the artifact store (the mock's
     `artifact_store` dict is the observable side).
 
-    Adapters that emit the raw PDF bytes inline in ChannelMessage.text
+    Adapters that emit the raw PDF bytes inline in ChannelIngress.text
     will flood the agent's context with binary garbage."""
     adapter = Adapter(config={"mock": mock})
     ev = mock.queue_pdf_attachment_message(body="see attached file")

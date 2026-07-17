@@ -1,7 +1,7 @@
 """LINE Messaging API adapter for the Session 11 channel slot.
 
 This adapter is a **wire-format translator only**: it turns an inbound LINE
-webhook into a ``ChannelMessage`` (``on_message``) and a ``ChannelReply`` into
+webhook into a ``ChannelIngress`` (``on_message``) and a ``ChannelReply`` into
 the right LINE Messaging API payload (``send``). It never opens a network
 connection itself — the actual HTTP call is delegated to an injected
 ``LineTransport``.
@@ -32,9 +32,7 @@ from time import monotonic
 from typing import Any, Literal, Protocol, overload
 
 from glc.channels.base import ChannelAdapter
-from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.security.allowlists import allowed
-from glc.security.trust_level import classify
+from glc.channels.envelope import ChannelIngress, ChannelReply
 
 from .schemas import LineEvent
 
@@ -118,7 +116,7 @@ class Adapter(ChannelAdapter):
         token, expires_at = item
         return token if expires_at >= monotonic() else None
 
-    async def on_message(self, raw: Any) -> ChannelMessage | None:  # type: ignore[override]
+    async def on_message(self, raw: Any) -> ChannelIngress | None:  # type: ignore[override]
         transport = self._transport(required=False)
         pop_disconnect = getattr(transport, "pop_disconnect", None)
         if callable(pop_disconnect):
@@ -141,24 +139,16 @@ class Adapter(ChannelAdapter):
             else:
                 self._set_local_reply_token(parsed.user_id, parsed.reply_token)
 
-        trust_level = classify(self.name, parsed.user_id)
-        if self.config.get("is_public_channel") and trust_level == "untrusted":
-            ok, _ = allowed(
-                self.name,
-                parsed.user_id,
-                is_public_channel=True,
-                was_mentioned=bool(self.config.get("was_mentioned", False)),
-            )
-            if not ok:
-                return None
-
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=parsed.user_id,
             user_handle=parsed.user_id,
             text=parsed.text,
-            trust_level=trust_level,
             arrived_at=datetime.now(UTC),
+            metadata={
+                "is_public_channel": bool(self.config.get("is_public_channel", False)),
+                "was_mentioned": bool(self.config.get("was_mentioned", False)),
+            },
         )
 
     async def send(self, reply: ChannelReply) -> Any:

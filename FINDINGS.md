@@ -81,6 +81,38 @@ The final gateway-spec Modal probe targeted the deployed `/data/glc/audit.sqlite
 `rows_before=1`, `rows_after=1`, and `chain_valid=true`. The authenticated live health check
 continued to return HTTP 200 with `{"ok": true, "port": 8111}`.
 
+## Leak 3 — Adapter code could grant itself owner trust
+
+**Invariant broken.** Every action must be checked against the actual user, tenant, and final
+arguments. An adapter-controlled trust claim must never become gateway authority.
+
+**Attacker role.** An attacker controlling a channel adapter or one of its dependencies.
+
+**Finding.** The pairing store exposed `force_pair_owner()` to every adapter in the monolithic
+process. The supplied reproduction created an owner record and the normal classifier immediately
+returned `owner_paired` for the attacker. After initial container separation, the gateway still
+trusted the adapter-supplied `trust_level`, so a slot could claim the same authority without even
+mutating the gateway database.
+
+**Fix.** Adapters now emit an untrusted `ChannelIngress` containing provider facts only. For each
+WebSocket message the gateway replaces the claimed channel with the authenticated slot, derives
+trust from its own pairing database, refreshes the owner list, and constructs the internal
+`ChannelMessage` before allowlist, rate-limit, audit, or agent processing. Legacy `channel` and
+`trust_level` fields remain accepted but are ignored. `force_pair_owner()` was removed; owners are
+provisioned only through the install-token-authenticated pair and confirm endpoints. Adapter images
+exclude the security package and pairing Volume, and gateway webhook routes no longer instantiate
+adapters in-process in local or production mode.
+
+**Post-fix evidence.** Regression tests prove a forged owner claim is dropped, a legitimately paired
+owner succeeds even when claiming `untrusted`, channel claims normalize to the authenticated slot,
+and pairings become visible on an existing WebSocket without reconnecting. Static image tests prove
+all 15 adapters avoid pairing/trust imports and the Telegram slot excludes pairing code and storage.
+The deployed Telegram probe reported `pairing_api_absent=true` and
+`forged_owner_rejected=true`; every LLM provider key was absent from the slot. The authenticated
+gateway health check returned `{"ok":true,"port":8111}`. The persisted live pairing database had no
+existing owner record, so owner success was verified by the control-plane-backed regression without
+creating a synthetic production owner.
+
 ## Full route map exposed by public OpenAPI document
 
 **Invariant broken.** Every externally reachable gateway surface must authenticate the caller before

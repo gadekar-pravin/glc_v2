@@ -34,9 +34,10 @@ erased by context compaction. Yaml does not compact.
 
 The audit store (`glc/audit/`) is database-enforced append-only. Its
 SQLite schema rejects `UPDATE` and `DELETE`, and every row is linked to
-the SHA-256 hash of its predecessor. The pairing store, the channels
-configuration, and the policy rules all live outside the LLM's write
-reach. Sessions 12 and onward expand the memory taxonomy to working /
+the SHA-256 hash of its predecessor. The pairing store and Volume are
+mounted only in the gateway; adapter images do not contain pairing code.
+The channels configuration and policy rules also live outside the LLM's
+write reach. Sessions 12 and onward expand the memory taxonomy to working /
 episodic / semantic / procedural classes; the write-permission
 discipline begins here.
 
@@ -59,14 +60,16 @@ Answers: Summer Yue having to physically reach the Mac mini.
 
 ## 5. Every channel envelope carries a trust level
 
-`TrustLevel` is `owner_paired | user_paired | untrusted`. Adapters
-classify inbound messages via `glc/security/trust_level.py`, which
-consults the pairing store. The policy engine reads the trust level
+`TrustLevel` is `owner_paired | user_paired | untrusted`. Adapters send
+an untrusted `ChannelIngress`; the gateway normalizes its channel to the
+authenticated slot and classifies the sender via `glc/security/trust_level.py`,
+which consults the gateway-only pairing store. Legacy adapter claims are
+accepted for wire compatibility but ignored. The policy engine reads the trust level
 before authorising any tool action; the lecture's default rule
 denies all tools for `untrusted`.
 
-Lives in: `glc/channels/envelope.py`, `glc/security/trust_level.py`,
-`glc/policy/`.
+Lives in: `glc/channels/envelope.py`, `glc/routes/channels.py`,
+`glc/security/trust_level.py`, `glc/policy/`.
 Answers: confused-deputy and indirect-prompt-injection. An email
 scraped from the inbox can carry instructions, but it arrives with
 `trust_level=untrusted` and the policy engine rejects everything.
