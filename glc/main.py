@@ -26,6 +26,7 @@ from glc import providers as P  # noqa: E402
 from glc.audit import init_store as init_audit  # noqa: E402
 from glc.cache import GeminiCache  # noqa: E402
 from glc.config import get_or_create_install_token  # noqa: E402
+from glc.ledger import SignedLedgerWriter  # noqa: E402
 from glc.policy import ProcessPolicyClient  # noqa: E402
 from glc.routes import channels as channels_route  # noqa: E402
 from glc.routes import chat as chat_route  # noqa: E402
@@ -68,6 +69,9 @@ async def lifespan(app: FastAPI):
         db.init()
         init_audit()
         get_or_create_install_token()
+        ledger = SignedLedgerWriter.from_environment(production=bool(getattr(app.state, "production", False)))
+        ledger.init()
+        app.state.ledger = ledger
         _install_sighup_reload(policy_client)
         app.state.cache = GeminiCache(ttl_seconds=300)
         app.state.providers = P.build_providers(app.state.cache)
@@ -164,6 +168,12 @@ def create_app(*, production: bool | None = None) -> FastAPI:
             return JSONResponse(
                 status_code=503,
                 content={"ok": False, "port": PORT, "policy": "unavailable"},
+            )
+        ledger = getattr(application.state, "ledger", None)
+        if ledger is None or not await asyncio.to_thread(ledger.integrity_ok):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "port": PORT, "ledger": "unavailable"},
             )
         return {"ok": True, "port": PORT}
 

@@ -19,6 +19,9 @@ cryptographic random generator; do not reuse an API key as either value.
 uv run modal secret create glc-creds-signing-key \
   GLC_CREDS_SIGNING_KEY=<at-least-32-random-bytes>
 
+uv run modal secret create glc-ledger-signing-key \
+  GLC_LEDGER_SIGNING_KEY=<different-at-least-32-random-bytes>
+
 uv run modal secret create telegram-slot-identity \
   GLC_SLOT_IDENTITY_TELEGRAM=<random-identity>
 
@@ -32,11 +35,17 @@ uv run modal deploy modal_app.py
 uv run modal deploy modal_telegram.py
 ```
 
-The gateway attaches `glc-install-token`, `glc-llm-keys`, `glc-creds-signing-key`, and the identities
-of deployed slots. The Telegram deployment attaches only `telegram-channel-secret`,
+The gateway attaches `glc-install-token`, `glc-llm-keys`, `glc-creds-signing-key`,
+`glc-ledger-signing-key`, and the identities of deployed slots. The Telegram deployment attaches only `telegram-channel-secret`,
 `telegram-slot-identity`, and `telegram-gateway-url`. Add a slot by creating the manifest-named
 channel/provider secret and a `<slot>-slot-identity` Secret containing the manifest's
 `GLC_SLOT_IDENTITY_<SLOT>` key.
+
+The two signing keys have separate purposes and must not be reused. `GLC_CREDS_SIGNING_KEY` signs
+short-lived tool credentials. `GLC_LEDGER_SIGNING_KEY` signs authoritative cost records. Neither key,
+the ledger package, `glc.db`, nor the gateway Volume is present in an adapter image. Local development
+derives a stable ledger key from its installation token when the dedicated environment variable is
+absent; production refuses to start without the dedicated Secret.
 
 The control token has a separate gateway-only Secret. Generate at least 32 random bytes, retain the
 operator copy in a password manager, and never place the value in shell history or logs. On macOS,
@@ -77,6 +86,8 @@ uv run modal run modal_telegram.py
 
 Expected evidence: all six provider-key presence values are `false`,
 `install_token_env_absent=true`, `install_token_file_readable=false`, `pairing_api_absent=true`, and
-`forged_owner_rejected=true`. The first chat request reaches the provider boundary (normally 502/503
-with mock keys), replay returns 401, cross-tool use returns 403, and the intended use after that
-denial still reaches the provider boundary.
+`forged_owner_rejected=true`. Ledger evidence must report `ledger_signing_key_absent=true`,
+`ledger_package_absent=true`, and `unsigned_ledger_api_absent=true`. The first chat request submits a
+forged `agent="victim"` but is accounted to the authenticated `telegram` slot before it reaches the
+provider boundary (normally 502/503 with mock keys). Replay returns 401, cross-tool use returns 403,
+and the intended use after that denial still reaches the provider boundary.

@@ -15,7 +15,9 @@ def _ignore(path: Path) -> bool:
     try:
         rel = path.relative_to(LOCAL_GLC)
     except ValueError:
-        return False
+        rel = path
+        if rel.parts and rel.parts[0] == LOCAL_GLC.name:
+            rel = Path(*rel.parts[1:])
     parts = rel.parts
     if len(parts) >= 3 and parts[:2] == ("channels", "catalogue"):
         return parts[2] != "telegram"
@@ -26,6 +28,7 @@ def _ignore(path: Path) -> bool:
             "audit",
             "config.py",
             "db.py",
+            "ledger",
             "policy",
             "providers.py",
             "routes",

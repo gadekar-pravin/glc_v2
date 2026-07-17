@@ -206,6 +206,62 @@ does not claim to withstand arbitrary gateway code that patches the IPC client o
 entirely; that stronger threat model requires policy authorization and protected action dispatch to
 move together into a separate broker.
 
+## Leak 10 — In-process code could poison the cost ledger
+
+**Invariants broken.** Every run must have hard limits on time, tokens, tool calls, and cost. Every
+action must also be checked against the actual user, tenant, and final arguments.
+
+**Attacker role.** Code executing inside the monolithic gateway interpreter. Before slot isolation,
+this included every channel adapter and its dependencies.
+
+**Finding.** `glc.db.log_call()` accepted arbitrary fields and inserted them directly into the active
+cost ledger. The assignment reproduction, run against an isolated temporary database, created a
+trusted-looking row with `agent="victim"` and `input_tokens=999999999`:
+
+```python
+import glc.db
+
+glc.db.log_call(
+    provider="gemini",
+    model="x",
+    input_tokens=999_999_999,
+    agent="victim",
+    status="ok",
+)
+```
+
+**Fix.** The module-level write API was removed. The gateway lifespan now owns a strict
+`SignedLedgerWriter`; it validates bounded accounting fields and signs a canonical schema-v2 record
+with HMAC-SHA256 before insertion. Each signature binds a unique event ID, timestamp, attribution,
+and every accounting field. Unique event IDs reject replay, SQLite triggers reject updates and
+deletes, and all cost reads verify every active signature before returning or aggregating data.
+Production requires a dedicated `GLC_LEDGER_SIGNING_KEY` Secret of at least 32 bytes.
+
+Existing unsigned rows cannot be authenticated retroactively. Startup therefore moves the old table
+transactionally to `calls_legacy_unsigned` for forensics and starts a clean signed table; quarantined
+rows never contribute to trusted totals. An invalid schema, missing trigger, invalid signature,
+duplicate event, or missing production key fails closed and makes ledger health unavailable.
+
+The existing container boundary is the other half of the fix: adapter images exclude `glc.db`, the
+ledger package, the gateway Volume, and both gateway signing keys. For scoped requests the gateway
+binds cost attribution to the authenticated slot, so a Telegram caller submitting `agent="victim"`
+is recorded as `telegram`. Trusted local and install-token clients retain their V9 agent labels. The
+Modal image filters now normalize the relative paths supplied by the SDK as well as absolute paths
+used by local tests, so the documented source boundary is enforced in the deployed images.
+
+**Post-fix evidence.** The exact reproduction now raises `AttributeError` because `glc.db.log_call`
+does not exist and the active ledger remains empty. Focused regressions cover the 10-million-token
+hard cap, strict types, signed writes, unchanged V9 read shapes, unsigned insert rejection, replay,
+append-only mutation blocking, signature tampering, legacy quarantine, production key validation,
+slot-bound attribution, policy-worker secret stripping, and gateway-only image/Secret/Volume access.
+The final live Modal probe reported `ledger_package_absent=true`,
+`ledger_signing_key_absent=true`, `unsigned_ledger_api_absent=true`, every provider key absent,
+install-token environment and file access absent, replay HTTP 401, and cross-tool use HTTP 403. The
+forged request reached the mock-provider boundary with HTTP 502; authenticated accounting returned
+`{"victim":[]}` and recorded all six probe failures under `telegram` with zero tokens and zero cost.
+Authenticated `/healthz` returned HTTP 200, and `/v1/calls` preserved its V9 shape without exposing
+event IDs or signatures.
+
 ## Full route map exposed by public OpenAPI document
 
 **Invariant broken.** Every externally reachable gateway surface must authenticate the caller before

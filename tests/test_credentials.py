@@ -5,6 +5,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,6 +17,7 @@ from glc.creds.issuer import issue_token
 from glc.creds.verify import CredentialError, verify_and_consume
 from glc.isolation.manifest import get_slot
 from glc.main import create_app
+from glc.routing import Router
 
 
 @pytest.fixture
@@ -79,6 +82,39 @@ def test_correct_scope_consumes_once_and_replay_fails(credential_client):
     )
     assert replay.status_code == 401
     assert "already used" in replay.json()["detail"]
+
+
+def test_slot_cannot_forge_cost_ledger_agent(credential_client):
+    provider = SimpleNamespace(
+        name="gemini",
+        model="gemini-test-model",
+        capabilities={},
+        chat=AsyncMock(
+            return_value={
+                "text": "ok",
+                "tool_calls": [],
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "stop_reason": "end_turn",
+                "model": "gemini-test-model",
+                "tool_call_dialect": "none",
+                "reasoning_applied": False,
+            }
+        ),
+    )
+    credential_client.app.state.router = Router({"gemini": provider}, ["gemini"])
+    token = _issue(credential_client).json()["access_token"]
+    response = credential_client.post(
+        "/v1/chat",
+        json={"prompt": "charge somebody else", "provider": "gemini", "agent": "victim"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    rows = credential_client.app.state.ledger.recent(limit=10)
+    assert rows[0]["agent"] == "telegram"
+    assert all(row["agent"] != "victim" for row in rows)
 
 
 def test_wrong_scope_does_not_consume_intended_grant(credential_client):

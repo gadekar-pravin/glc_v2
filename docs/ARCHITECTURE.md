@@ -103,6 +103,25 @@ Lives in: `glc/audit/`.
 Answers: the recovery scenario after a bad outcome — the operator
 can replay exactly what the agent saw and did.
 
+## 7. Cost accounting has one signed gateway writer
+
+The per-call cost ledger is separate from the security audit history. It has no module-level write
+function. FastAPI lifespan creates one `SignedLedgerWriter`, and trusted gateway routes pass provider
+usage through its strict schema. Every active row carries a unique event ID and an HMAC-SHA256
+signature over its timestamp, attribution, and all accounting fields. Reads verify signatures before
+returning or aggregating rows; replay, mutation, missing append-only triggers, and invalid signatures
+fail closed. Token fields are strict, non-negative, and capped at ten million per field.
+
+Production receives `GLC_LEDGER_SIGNING_KEY` from the gateway-only `glc-ledger-signing-key` Modal
+Secret. Adapter images contain neither the writer nor `glc.db`, receive neither signing key, and have
+no gateway Volume. Scoped tool calls are accounted to the authenticated slot instead of a submitted
+agent label. Pre-upgrade unsigned rows remain in `calls_legacy_unsigned` for forensics and are never
+included in trusted totals.
+
+Lives in: `glc/ledger/`, lifecycle wiring in `glc/main.py`, and cost routes in
+`glc/routes/chat.py`.
+Answers: cost-ledger poisoning and forged cross-agent attribution.
+
 ## What S12 works on
 
 The S11 policy engine is the application-level enforcement layer.

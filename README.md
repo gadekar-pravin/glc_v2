@@ -23,7 +23,18 @@ To deploy on Modal, see `modal_app.py` and Session 12 Section 6. Use mock keys o
 The hardened deployment separates channel and external voice slots from the gateway. Its 22-slot
 least-privilege manifest, single-use tool credential flow, Telegram reference deployment, and safe
 proof command are documented in [`docs/SLOT_ISOLATION.md`](docs/SLOT_ISOLATION.md). Channel slots do
-not receive `glc-llm-keys` or the installation token.
+not receive `glc-llm-keys`, either signing key, the installation token, or the gateway Volume.
+
+Authoritative cost rows are written only by the gateway-owned signed ledger. Production requires a
+separate random signing Secret; do not reuse a provider key or the tool-credential signing key:
+
+```sh
+uv run modal secret create glc-ledger-signing-key \
+  GLC_LEDGER_SIGNING_KEY=<at-least-32-random-bytes>
+```
+
+Unsigned ledgers are quarantined as `calls_legacy_unsigned` during the upgrade and excluded from
+trusted totals because their history cannot be authenticated retroactively.
 
 The Modal wrapper runs with `GLC_ENV=production`. Production disables `/openapi.json`, `/docs`, and
 `/redoc`, and every HTTP request requires the gateway-only installation token. Create a random token,

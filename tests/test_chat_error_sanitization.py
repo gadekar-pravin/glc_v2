@@ -75,9 +75,7 @@ def test_pinned_provider_error_is_generic_logged_and_absent_from_calls(app_clien
     assert RAW_UPSTREAM_ERROR not in response.text
     assert RAW_UPSTREAM_ERROR in caplog.text
 
-    from glc import db
-
-    db.log_call(
+    app_client.app.state.ledger.log_call(
         provider="gemini",
         model="historical-model",
         status="error",

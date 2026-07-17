@@ -64,6 +64,8 @@ def test_gateway_and_telegram_image_filters_enforce_code_boundary():
     assert modal_app._gateway_ignore(root / "voice/stt/providers/groq_whisper/adapter.py")
     assert not modal_app._gateway_ignore(root / "providers.py")
     assert not modal_app._gateway_ignore(root / "voice/tts/providers/system_fallback/adapter.py")
+    assert modal_app._gateway_ignore(Path("channels/catalogue/telegram/adapter.py"))
+    assert not modal_app._gateway_ignore(Path("providers.py"))
 
     assert not modal_telegram._ignore(root / "channels/catalogue/telegram/adapter.py")
     assert modal_telegram._ignore(root / "channels/catalogue/discord/adapter.py")
@@ -72,6 +74,11 @@ def test_gateway_and_telegram_image_filters_enforce_code_boundary():
     assert modal_telegram._ignore(root / "security/pairing.py")
     assert modal_telegram._ignore(root / "security/trust_level.py")
     assert modal_telegram._ignore(root / "config.py")
+    assert modal_telegram._ignore(root / "db.py")
+    assert modal_telegram._ignore(root / "ledger/writer.py")
+    assert not modal_telegram._ignore(Path("channels/catalogue/telegram/adapter.py"))
+    assert modal_telegram._ignore(Path("db.py"))
+    assert modal_telegram._ignore(Path("ledger/writer.py"))
 
 
 def test_audit_volume_is_mounted_only_on_gateway_function():
@@ -95,6 +102,17 @@ def test_install_token_secret_is_bound_only_to_gateway_function():
     assert install_secret not in {repr(secret) for secret in modal_telegram.security_probe.spec.secrets}
 
 
+def test_ledger_signing_secret_is_bound_only_to_gateway_function():
+    import modal_app
+    import modal_telegram
+
+    ledger_secret = repr(modal_app.ledger_signing_secret)
+    gateway_secrets = {repr(secret) for secret in modal_app.fastapi_app.spec.secrets}
+    assert ledger_secret in gateway_secrets
+    assert ledger_secret not in {repr(secret) for secret in modal_telegram.telegram_adapter.spec.secrets}
+    assert ledger_secret not in {repr(secret) for secret in modal_telegram.security_probe.spec.secrets}
+
+
 def test_adapter_process_environment_does_not_inherit_gateway_provider_keys(tmp_path):
     gateway_env = os.environ.copy()
     for key in PROVIDER_SECRET_KEYS:
@@ -114,6 +132,7 @@ def test_adapter_process_environment_does_not_inherit_gateway_provider_keys(tmp_
         "print(json.dumps({"
         "'provider_keys_present': {key: key in os.environ for key in keys}, "
         "'install_token_env_present': 'GLC_INSTALL_TOKEN' in os.environ, "
+        "'ledger_signing_key_present': 'GLC_LEDGER_SIGNING_KEY' in os.environ, "
         "'install_token_file_readable': os.path.isfile(candidate) and os.access(candidate, os.R_OK)"
         "}, sort_keys=True))"
     )
@@ -128,6 +147,7 @@ def test_adapter_process_environment_does_not_inherit_gateway_provider_keys(tmp_
     evidence = json.loads(result.stdout)
     assert all(value is False for value in evidence["provider_keys_present"].values())
     assert evidence["install_token_env_present"] is False
+    assert evidence["ledger_signing_key_present"] is False
     assert evidence["install_token_file_readable"] is False
 
 

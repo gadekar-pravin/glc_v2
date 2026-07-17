@@ -4,7 +4,7 @@ Modal deployment wrapper for the isolated GLC gateway.
 This file changes NO application code. It only describes, for Modal:
   1. the container image to build,
   2. a persistent Volume for gateway config and databases,
-  3. gateway-only install-token, provider, and credential-signing Secrets,
+  3. gateway-only install-token, provider, credential, and ledger-signing Secrets,
   4. per-slot identities used to authenticate isolated adapters,
   5. which object to serve  ->  glc.main:app.
 
@@ -27,7 +27,9 @@ def _gateway_ignore(path: Path) -> bool:
     try:
         parts = path.relative_to(LOCAL_GLC).parts
     except ValueError:
-        return False
+        parts = path.parts
+        if parts and parts[0] == LOCAL_GLC.name:
+            parts = parts[1:]
     if len(parts) >= 3 and parts[:2] == ("channels", "catalogue"):
         return True
     if len(parts) >= 4 and parts[:3] == ("voice", "stt", "providers"):
@@ -81,6 +83,7 @@ data_volume = modal.Volume.from_name("glc-data", create_if_missing=True)
 # separately with `modal secret create glc-llm-keys ...` (mock values for now).
 llm_secret = modal.Secret.from_name("glc-llm-keys")
 signing_secret = modal.Secret.from_name("glc-creds-signing-key")
+ledger_signing_secret = modal.Secret.from_name("glc-ledger-signing-key")
 telegram_identity_secret = modal.Secret.from_name("telegram-slot-identity")
 install_token_secret = modal.Secret.from_name("glc-install-token")
 
@@ -88,7 +91,13 @@ install_token_secret = modal.Secret.from_name("glc-install-token")
 @app.function(
     image=image,
     volumes={"/data": data_volume},
-    secrets=[llm_secret, signing_secret, telegram_identity_secret, install_token_secret],
+    secrets=[
+        llm_secret,
+        signing_secret,
+        ledger_signing_secret,
+        telegram_identity_secret,
+        install_token_secret,
+    ],
     min_containers=0,  # scale to zero when idle -> protects the free tier
     max_containers=1,  # SQLite single-use ledger requires one writer container
 )

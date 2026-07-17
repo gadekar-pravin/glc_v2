@@ -81,6 +81,7 @@ async def security_probe() -> dict[str, Any]:
     """Return booleans/statuses only. Secret values never enter the result."""
     provider_keys_absent = {name: name not in os.environ for name in sorted(PROVIDER_SECRET_KEYS)}
     install_token_env_absent = "GLC_INSTALL_TOKEN" not in os.environ
+    ledger_signing_key_absent = "GLC_LEDGER_SIGNING_KEY" not in os.environ
     install_token_path = os.path.join(os.getenv("GLC_CONFIG_DIR", "."), "install_token")
     install_token_file_readable = os.path.isfile(install_token_path) and os.access(
         install_token_path, os.R_OK
@@ -90,6 +91,18 @@ async def security_probe() -> dict[str, Any]:
         pairing_api_absent = not hasattr(pairing.get_pairing_store(), "force_pair_owner")
     except ModuleNotFoundError:
         pairing_api_absent = True
+
+    try:
+        ledger_db = import_module("glc.db")
+        unsigned_ledger_api_absent = not hasattr(ledger_db, "log_call")
+    except ModuleNotFoundError:
+        unsigned_ledger_api_absent = True
+
+    try:
+        import_module("glc.ledger.writer")
+        ledger_package_absent = False
+    except ModuleNotFoundError:
+        ledger_package_absent = True
 
     forged_owner_rejected = False
     headers = {"Authorization": f"Bearer {_identity()}"}
@@ -115,7 +128,11 @@ async def security_probe() -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {chat_token.access_token}"}
         first = await client.post(
             f"{_gateway_url()}/v1/chat",
-            json={"prompt": "credential isolation probe", "provider": "gemini"},
+            json={
+                "prompt": "credential and ledger isolation probe",
+                "provider": "gemini",
+                "agent": "victim",
+            },
             headers=headers,
         )
         replay = await client.post(
@@ -139,8 +156,11 @@ async def security_probe() -> dict[str, Any]:
     return {
         "provider_keys_absent": provider_keys_absent,
         "install_token_env_absent": install_token_env_absent,
+        "ledger_signing_key_absent": ledger_signing_key_absent,
         "install_token_file_readable": install_token_file_readable,
         "pairing_api_absent": pairing_api_absent,
+        "unsigned_ledger_api_absent": unsigned_ledger_api_absent,
+        "ledger_package_absent": ledger_package_absent,
         "forged_owner_rejected": forged_owner_rejected,
         "first_status": first.status_code,
         "replay_status": replay.status_code,

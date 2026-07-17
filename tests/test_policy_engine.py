@@ -286,6 +286,7 @@ def test_process_worker_receives_no_gateway_secrets(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "mock-not-real")
     monkeypatch.setenv("GLC_INSTALL_TOKEN", "mock-not-real")
     monkeypatch.setenv("GLC_CREDS_SIGNING_KEY", "mock-not-real")
+    monkeypatch.setenv("GLC_LEDGER_SIGNING_KEY", "mock-not-real")
     monkeypatch.setenv("GLC_SLOT_IDENTITY_TELEGRAM", "mock-not-real")
     client = ProcessPolicyClient()
     client.start()  # startup rejects a worker that reports any sensitive environment variable

@@ -31,7 +31,7 @@ PROVIDER_SECRET_KEYS = frozenset(
     }
 )
 
-GATEWAY_ONLY_SECRET_KEYS = frozenset({"GLC_INSTALL_TOKEN"})
+GATEWAY_ONLY_SECRET_KEYS = frozenset({"GLC_INSTALL_TOKEN", "GLC_CREDS_SIGNING_KEY", "GLC_LEDGER_SIGNING_KEY"})
 
 _PATH = Path(__file__).with_name("slots.yaml")
 
