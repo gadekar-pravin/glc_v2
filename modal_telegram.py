@@ -11,6 +11,7 @@ from modal.exception import AlreadyExistsError, NotFoundError
 
 from glc.isolation.egress import build_slot_egress_allowlist
 from glc.isolation.manifest import get_slot
+from modal_images import locked_runtime_image
 
 APP_NAME = "glc-adapter-telegram"
 GATEWAY_APP_NAME = "glc-v1-gateway"
@@ -53,13 +54,7 @@ def _ignore(path: Path) -> bool:
 
 
 image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install(
-        "httpx>=0.27",
-        "pydantic>=2.6",
-        "pyyaml>=6.0",
-        "websockets>=16.0",
-    )
+    locked_runtime_image(only_group="telegram-runtime")
     .env({"GLC_SLOT": "telegram"})
     .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc", ignore=_ignore, copy=True)
 )

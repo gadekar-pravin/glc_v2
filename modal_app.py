@@ -15,6 +15,8 @@ from pathlib import Path
 
 import modal
 
+from modal_images import locked_runtime_image
+
 # The Modal "app" is just a namespace for everything we deploy under this name.
 app = modal.App("glc-v1-gateway")
 
@@ -39,23 +41,11 @@ def _gateway_ignore(path: Path) -> bool:
     return False
 
 
-# The image = a Linux box with Python 3.11, the same dependencies as
-# pyproject.toml, the glc package copied in, and database paths pointed at the
-# Volume mount so state survives the throwaway container filesystem.
+# The image = an immutable Python 3.11 base with production dependencies from
+# uv.lock, the glc package copied in, and database paths pointed at the Volume
+# mount so state survives the throwaway container filesystem.
 image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install(
-        "fastapi>=0.110",
-        "uvicorn[standard]>=0.27",
-        "httpx>=0.27",
-        "python-dotenv>=1.0",
-        "pydantic>=2.6",
-        "jsonschema>=4.21",
-        "pyyaml>=6.0",
-        "pyjwt>=2.9",
-        "websockets>=12.0",
-        "twilio>=9.0",
-    )
+    locked_runtime_image()
     .env(
         {
             # User policy/channels overrides live on the Volume. The control token
