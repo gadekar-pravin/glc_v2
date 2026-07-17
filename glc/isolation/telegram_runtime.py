@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from datetime import UTC, datetime
 from importlib import import_module
 from typing import Any
@@ -42,39 +43,46 @@ def _ws_url() -> str:
     raise RuntimeError("GLC_GATEWAY_URL must start with http:// or https://")
 
 
+def _gateway_websocket(headers: dict[str, str]):
+    """Connect directly so ambient proxy settings cannot stall the TLS upgrade."""
+    return websockets.connect(
+        _ws_url(),
+        additional_headers=headers,
+        proxy=None,
+        open_timeout=30,
+    )
+
+
 async def run() -> None:
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
     adapter = Adapter()
+    offset = 0
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while True:
+            response = await client.get(
+                f"https://api.telegram.org/bot{bot_token}/getUpdates",
+                params={"offset": offset, "timeout": 10},
+            )
+            if response.status_code == 200:
+                payload = response.json()
+                for update in payload.get("result", ()) if payload.get("ok") else ():
+                    offset = int(update["update_id"]) + 1
+                    message = await adapter.on_message(update)
+                    if message is not None:
+                        await _gateway_roundtrip(adapter, message.model_dump_json())
+            await asyncio.sleep(1)
+
+
+async def _gateway_roundtrip(adapter: Adapter, message: str) -> None:
+    """Use a bounded WebSocket input; the gateway Function has a five-minute input timeout."""
     headers = {"Authorization": f"Bearer {_identity()}"}
-    async with websockets.connect(_ws_url(), additional_headers=headers) as websocket:
-        offset = 0
-
-        async def poll() -> None:
-            nonlocal offset
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                while True:
-                    response = await client.get(
-                        f"https://api.telegram.org/bot{bot_token}/getUpdates",
-                        params={"offset": offset, "timeout": 10},
-                    )
-                    if response.status_code == 200:
-                        payload = response.json()
-                        for update in payload.get("result", ()) if payload.get("ok") else ():
-                            offset = int(update["update_id"]) + 1
-                            message = await adapter.on_message(update)
-                            if message is not None:
-                                await websocket.send(message.model_dump_json())
-                    await asyncio.sleep(1)
-
-        async def replies() -> None:
-            async for raw in websocket:
-                payload = json.loads(raw)
-                if "error" not in payload:
-                    await adapter.send(ChannelReply.model_validate(payload))
-
-        await asyncio.gather(poll(), replies())
+    async with _gateway_websocket(headers) as websocket:
+        await websocket.send(message)
+        payload = json.loads(await websocket.recv())
+    if "error" not in payload:
+        await adapter.send(ChannelReply.model_validate(payload))
 
 
 async def security_probe() -> dict[str, Any]:
@@ -106,7 +114,7 @@ async def security_probe() -> dict[str, Any]:
 
     forged_owner_rejected = False
     headers = {"Authorization": f"Bearer {_identity()}"}
-    async with websockets.connect(_ws_url(), additional_headers=headers) as websocket:
+    async with _gateway_websocket(headers) as websocket:
         await websocket.send(
             json.dumps(
                 {
@@ -122,6 +130,11 @@ async def security_probe() -> dict[str, Any]:
         )
         response = json.loads(await websocket.recv())
         forged_owner_rejected = "dropped" in response.get("error", "")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        gateway_network = await _network_result(client, f"{_gateway_url()}/healthz")
+        telegram_network = await _network_result(client, "https://api.telegram.org")
+        denied_network = await _network_result(client, "https://example.com")
 
     chat_token = await get_token(tool="llm.chat")
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -162,8 +175,35 @@ async def security_probe() -> dict[str, Any]:
         "unsigned_ledger_api_absent": unsigned_ledger_api_absent,
         "ledger_package_absent": ledger_package_absent,
         "forged_owner_rejected": forged_owner_rejected,
+        "gateway_reachable": gateway_network["reachable"],
+        "gateway_status": gateway_network["status"],
+        "telegram_api_reachable": telegram_network["reachable"],
+        "telegram_api_status": telegram_network["status"],
+        "non_allowlisted_domain_blocked": not denied_network["reachable"],
         "first_status": first.status_code,
         "replay_status": replay.status_code,
         "cross_tool_status": cross_tool.status_code,
         "intended_after_denial_status": intended_after_denial.status_code,
     }
+
+
+async def _network_result(client: httpx.AsyncClient, url: str) -> dict[str, bool | int | None]:
+    """Return non-sensitive reachability evidence for one HTTPS origin."""
+    try:
+        response = await client.get(url)
+    except httpx.HTTPError:
+        return {"reachable": False, "status": None}
+    return {"reachable": True, "status": response.status_code}
+
+
+def main() -> None:
+    if sys.argv[1:] == ["--security-probe"]:
+        print(json.dumps(asyncio.run(security_probe()), sort_keys=True), flush=True)
+        return
+    if sys.argv[1:]:
+        raise SystemExit("usage: python -m glc.isolation.telegram_runtime [--security-probe]")
+    asyncio.run(run())
+
+
+if __name__ == "__main__":
+    main()

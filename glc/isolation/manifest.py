@@ -46,6 +46,7 @@ class Slot:
     secret_name: str
     secret_keys: tuple[str, ...]
     allowed_tools: tuple[str, ...]
+    egress_domains: tuple[str, ...]
     cpu: float
     memory_mb: int
     timeout_seconds: int
@@ -75,6 +76,11 @@ def _parse(raw: dict) -> Slot:
         raise RuntimeError(f"slot {name!r} must not receive gateway-only secrets {sorted(gateway_only)}")
     if kind == "channel" and PROVIDER_SECRET_KEYS.intersection(secret_keys):
         raise RuntimeError(f"channel slot {name!r} must not receive LLM provider keys")
+    egress_domains = tuple(raw.get("egress_domains", ()))
+    if egress_domains:
+        from glc.isolation.egress import validate_egress_domains
+
+        egress_domains = validate_egress_domains(egress_domains)
     resources = raw.get("resources", {})
     return Slot(
         name=name,
@@ -85,6 +91,7 @@ def _parse(raw: dict) -> Slot:
         secret_name=str(raw["secret_name"]),
         secret_keys=secret_keys,
         allowed_tools=tools,
+        egress_domains=egress_domains,
         cpu=float(resources.get("cpu", 0.25)),
         memory_mb=int(resources.get("memory_mb", 256)),
         timeout_seconds=int(resources.get("timeout_seconds", 600)),

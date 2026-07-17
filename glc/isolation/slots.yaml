@@ -8,7 +8,7 @@ slots:
   - {name: signal, kind: channel, package: glc.channels.catalogue.signal, runtime: polling, secret_name: signal-channel-secret, secret_keys: [SIGNAL_ACCOUNT], allowed_tools: [llm.chat]}
   - {name: slack, kind: channel, package: glc.channels.catalogue.slack, runtime: webhook, secret_name: slack-channel-secret, secret_keys: [SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET], allowed_tools: [llm.chat]}
   - {name: teams, kind: channel, package: glc.channels.catalogue.teams, runtime: webhook, secret_name: teams-channel-secret, secret_keys: [TEAMS_APP_ID, TEAMS_APP_PASSWORD, TEAMS_TENANT_ID], allowed_tools: [llm.chat]}
-  - {name: telegram, kind: channel, package: glc.channels.catalogue.telegram, runtime: polling, secret_name: telegram-channel-secret, secret_keys: [TELEGRAM_BOT_TOKEN], allowed_tools: [llm.chat]}
+  - {name: telegram, kind: channel, package: glc.channels.catalogue.telegram, runtime: polling, secret_name: telegram-channel-secret, secret_keys: [TELEGRAM_BOT_TOKEN], allowed_tools: [llm.chat], egress_domains: [api.telegram.org]}
   - {name: twilio_sms, kind: channel, package: glc.channels.catalogue.twilio_sms, runtime: webhook, secret_name: twilio-sms-channel-secret, secret_keys: [TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER], allowed_tools: [llm.chat]}
   - {name: twilio_voice, kind: channel, package: glc.channels.catalogue.twilio_voice, runtime: webhook, secret_name: twilio-voice-channel-secret, secret_keys: [TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER], allowed_tools: [llm.chat, stt.transcribe, tts.synthesize]}
   - {name: webhook, kind: channel, package: glc.channels.catalogue.webhook, runtime: webhook, secret_name: webhook-channel-secret, secret_keys: [WEBHOOK_SHARED_SECRET], allowed_tools: [llm.chat]}

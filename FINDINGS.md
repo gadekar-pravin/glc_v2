@@ -206,6 +206,50 @@ does not claim to withstand arbitrary gateway code that patches the IPC client o
 entirely; that stronger threat model requires policy authorization and protected action dispatch to
 move together into a separate broker.
 
+## A3 / Leak 6 — Adapter containers had unrestricted outbound network access
+
+**Invariant broken.** An untrusted component must have only the network authority its declared role
+requires. Container separation is not an egress boundary when compromised code can connect to any
+public destination.
+
+**Attacker role.** An attacker controlling a channel adapter or one of its dependencies.
+
+**Finding.** The gateway is intentionally a trusted Modal Function that needs provider access, but
+the separated Telegram adapter and its security probe were also deployed as Modal Functions. Modal
+Functions have no outbound-domain control, and `modal_telegram.py` contained no network allowlist.
+The live gateway logs independently proved the deployment could reach the public internet: on
+2026-07-17, the mock Gemini request reached `generativelanguage.googleapis.com` and received the
+upstream `API_KEY_INVALID` response. An owned adapter Function could therefore send data to an
+arbitrary attacker-controlled TLS endpoint just as easily.
+
+**Fix.** Telegram adapter code now runs only as the entrypoint of a named Modal Sandbox. Its
+`outbound_domain_allowlist` contains exactly `api.telegram.org` and the hostname dynamically
+discovered from the deployed gateway URL. The Sandbox receives only the Telegram channel token and
+slot identity, exposes no inbound port, and mounts no Volume. The two Modal Functions left in the
+adapter app are trusted, secretless orchestration functions: one reconciles the named Sandbox every
+five minutes across Modal's 24-hour Sandbox lifetime, and one launches a short-lived proof Sandbox.
+
+The slot manifest now carries an explicit `egress_domains` contract. Launch fails closed for an
+empty declaration, a URL or path, a port, an IP literal, malformed DNS, or any wildcard.
+The exact gateway hostname is validated and appended centrally, so future launchers cannot silently
+fall back to unrestricted network access or a broad `*.modal.run` rule.
+
+**Post-fix evidence.** The local regression suite proves the supervisor Functions bind no Secrets or
+Volumes, the Sandbox receives only its two slot Secrets, its allowlist and resource limits are
+exact, and running, expired, and concurrent named-Sandbox lifecycle paths behave correctly. The
+short-lived runtime test proves allowed and denied network outcomes without using the internet.
+
+The Telegram-only deployment on 2026-07-17 started named Sandbox
+`sb-CJScffdYiJUaRjAZWCTDM5`; two reconciliations returned that same running ID. The final clean-commit
+probe Sandbox `sb-Rr9L6B5kXI4cTGMv6rAshm` reported the exact allowlist
+`["api.telegram.org", "pbgadekar--glc-v1-gateway-fastapi-app.modal.run"]`, reached Telegram and the
+gateway, and reported `non_allowlisted_domain_blocked=true`. Modal's system stream recorded
+`blocking all outbound connections to example.com (not on allow-list)` at 09:55:22 IST. The same
+proof reported every provider key absent, no install token file or environment value, no ledger
+signing key/package/API, no pairing mutation API, forged-owner rejection, first/intended chat
+statuses 502 under mock keys, replay 401, and cross-tool denial 403. An independent authenticated
+gateway check returned HTTP 200 with `{"ok": true, "port": 8111}`.
+
 ## Leak 10 — In-process code could poison the cost ledger
 
 **Invariants broken.** Every run must have hard limits on time, tokens, tool calls, and cost. Every

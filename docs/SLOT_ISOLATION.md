@@ -6,9 +6,11 @@ the only component that receives `glc-llm-keys`; channel slots receive only thei
 and identity.
 
 The validated source of truth is `glc/isolation/slots.yaml`: 15 channel slots and 7 external voice
-slots. `system_fallback` remains inside the gateway because it has no external credential. External
-voice slots may receive only their own upstream key. Missing voice-slot URLs fail closed with HTTP
-503 in production; the gateway does not import the provider locally.
+slots. A runnable slot must also declare exact `egress_domains`; the shared policy builder rejects an
+empty policy, URLs, paths, ports, IP literals, and wildcard entries. `system_fallback` remains
+inside the gateway because it has no external credential. External voice slots may receive only
+their own upstream key. Missing voice-slot URLs fail closed with HTTP 503 in production; the gateway
+does not import the provider locally.
 
 ## Gateway and Telegram reference deployment
 
@@ -28,18 +30,27 @@ uv run modal secret create telegram-slot-identity \
 uv run modal secret create telegram-channel-secret \
   TELEGRAM_BOT_TOKEN=mock-not-real
 
-uv run modal secret create telegram-gateway-url \
-  GLC_GATEWAY_URL=https://<workspace>--glc-v1-gateway-fastapi-app.modal.run
-
 uv run modal deploy modal_app.py
 uv run modal deploy modal_telegram.py
+uv run modal run modal_telegram.py
 ```
 
 The gateway attaches `glc-install-token`, `glc-llm-keys`, `glc-creds-signing-key`,
-`glc-ledger-signing-key`, and the identities of deployed slots. The Telegram deployment attaches only `telegram-channel-secret`,
-`telegram-slot-identity`, and `telegram-gateway-url`. Add a slot by creating the manifest-named
-channel/provider secret and a `<slot>-slot-identity` Secret containing the manifest's
-`GLC_SLOT_IDENTITY_<SLOT>` key.
+`glc-ledger-signing-key`, and the identities of deployed slots. The deployed Telegram supervisor is
+a trusted Modal Function with no Secrets, Volumes, or adapter imports. It discovers the gateway's
+public URL as non-secret configuration and creates the named `telegram-adapter` Modal Sandbox. Only
+that Sandbox receives `telegram-channel-secret` and `telegram-slot-identity`; the obsolete
+`telegram-gateway-url` Secret is not bound anywhere. Add a slot by creating the manifest-named
+channel/provider secret, a `<slot>-slot-identity` Secret containing the manifest's
+`GLC_SLOT_IDENTITY_<SLOT>` key, and an exact non-empty egress-domain policy.
+
+Telegram's allowlist is exactly `api.telegram.org` plus the hostname discovered from the deployed
+gateway URL. It does not use `*.modal.run`, expose an inbound port, or mount a Volume. Modal
+Sandboxes have a maximum 24-hour lifetime, so `reconcile_telegram_sandbox` runs every five minutes.
+It reuses the running named Sandbox or replaces it after exit/expiry; the unique name closes
+concurrent-creation races. The Sandbox long-polls Telegram continuously but opens a bounded gateway
+WebSocket only for an actual update, so an idle adapter does not occupy the gateway Function's input.
+The trusted supervisor itself never executes adapter code.
 
 The two signing keys have separate purposes and must not be reused. `GLC_CREDS_SIGNING_KEY` signs
 short-lived tool credentials. `GLC_LEDGER_SIGNING_KEY` signs authoritative cost records. Neither key,
@@ -77,11 +88,13 @@ health check, remove that stale file with
    atomically marks the JTI used before provider execution; replay fails with HTTP 401.
 5. A wrong tool or model fails with HTTP 403 without consuming the intended grant.
 
-Run the safe Modal probe after deployment. It returns presence booleans and HTTP statuses only; it
-never returns secret values:
+The first command starts or confirms the long-running named Sandbox and returns its `sb-*` ID. The
+second creates a short-lived Sandbox with the identical image, Secrets, resource limits, and egress
+policy. It returns presence booleans and HTTP statuses only; it never returns secret values:
 
 ```sh
 uv run modal run modal_telegram.py
+uv run modal run modal_telegram.py --probe
 ```
 
 Expected evidence: all six provider-key presence values are `false`,
@@ -90,4 +103,7 @@ Expected evidence: all six provider-key presence values are `false`,
 `ledger_package_absent=true`, and `unsigned_ledger_api_absent=true`. The first chat request submits a
 forged `agent="victim"` but is accounted to the authenticated `telegram` slot before it reaches the
 provider boundary (normally 502/503 with mock keys). Replay returns 401, cross-tool use returns 403,
-and the intended use after that denial still reaches the provider boundary.
+and the intended use after that denial still reaches the provider boundary. Egress evidence must
+report `gateway_reachable=true`, `telegram_api_reachable=true`, and
+`non_allowlisted_domain_blocked=true`; the returned allowlist must contain only `api.telegram.org`
+and the exact gateway hostname.
