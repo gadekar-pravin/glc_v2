@@ -77,7 +77,7 @@ class Adapter(ChannelAdapter):
             metadata={
                 **({"session_id": session_id} if session_id else {}),
                 "is_public_channel": bool(self.is_public_channel),
-                "was_mentioned": bool(raw.get("was_mentioned", False)),
+                "was_mentioned": False,
             },
         )
 

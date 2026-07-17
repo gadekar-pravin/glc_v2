@@ -8,6 +8,7 @@ import selectors
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -162,16 +163,28 @@ class ProcessPolicyClient:
             raise PolicyWorkerError("policy worker request failed") from exc
 
         selector = selectors.DefaultSelector()
+        deadline = time.monotonic() + timeout
+        response_bytes = bytearray()
         try:
             selector.register(process.stdout, selectors.EVENT_READ)
-            if not selector.select(timeout):
-                raise PolicyWorkerError("policy worker response timed out")
+            while b"\n" not in response_bytes:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise PolicyWorkerError("policy worker response timed out")
+                chunk = os.read(process.stdout.fileno(), 4096)
+                if not chunk:
+                    raise PolicyWorkerError("policy worker closed its response stream")
+                response_bytes.extend(chunk)
         finally:
             selector.close()
 
-        line = process.stdout.readline()
-        if not line:
-            raise PolicyWorkerError("policy worker closed its response stream")
+        line_bytes, _separator, trailing = bytes(response_bytes).partition(b"\n")
+        if trailing:
+            raise PolicyWorkerError("policy worker returned unexpected extra data")
+        try:
+            line = line_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise PolicyWorkerError("policy worker returned malformed UTF-8") from exc
         try:
             response = json.loads(line)
         except json.JSONDecodeError as exc:

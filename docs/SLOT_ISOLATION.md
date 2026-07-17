@@ -105,5 +105,5 @@ forged `agent="victim"` but is accounted to the authenticated `telegram` slot be
 provider boundary (normally 502/503 with mock keys). Replay returns 401, cross-tool use returns 403,
 and the intended use after that denial still reaches the provider boundary. Egress evidence must
 report `gateway_reachable=true`, `telegram_api_reachable=true`, and
-`non_allowlisted_domain_blocked=true`; the returned allowlist must contain only `api.telegram.org`
-and the exact gateway hostname.
+`non_allowlisted_domain_unreachable=true`; this reachability result is neutral, while the returned
+allowlist must contain only `api.telegram.org` and the exact gateway hostname.

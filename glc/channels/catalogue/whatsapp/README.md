@@ -8,7 +8,7 @@ to make the test suite at `tests/channels/test_whatsapp.py` pass.
 Two files under this directory:
 
 - `adapter.py` — subclass `glc.channels.base.ChannelAdapter` and implement
-  `on_message(raw) -> ChannelIngress` and `send(reply) -> Any`.
+  `on_message(raw) -> ChannelIngress | None` and `send(reply) -> Any`.
 - `schemas.py` — any channel-specific Pydantic types you need.
 
 ## Required environment variables

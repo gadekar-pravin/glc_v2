@@ -13,16 +13,25 @@ import ipaddress
 import os
 import socket
 from collections.abc import Sequence
+from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit
 
 import httpx
 
 MAX_REDIRECTS = 5
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
 class ImageURLFetchError(ValueError):
     """Raised when a remote image URL is unsafe or cannot be fetched."""
+
+
+@dataclass(frozen=True)
+class _ValidatedDestination:
+    hostname: str
+    address: str
+    host_header: str
 
 
 def _normalize_hostname(hostname: str) -> str:
@@ -54,7 +63,7 @@ async def _resolve_addresses(hostname: str, port: int) -> Sequence[str]:
     return tuple({result[4][0] for result in results})
 
 
-async def _validate_public_destination(url: str) -> None:
+async def _validate_public_destination(url: str) -> _ValidatedDestination:
     try:
         parsed = urlsplit(url)
         port = parsed.port
@@ -76,6 +85,7 @@ async def _validate_public_destination(url: str) -> None:
     if not resolved:
         raise ImageURLFetchError(f"image host {hostname!r} resolved to no addresses")
 
+    public_addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
     for raw_address in resolved:
         # getaddrinfo may include an IPv6 scope identifier (for example
         # ``fe80::1%eth0``).  The address itself is enough for classification.
@@ -88,6 +98,38 @@ async def _validate_public_destination(url: str) -> None:
             raise ImageURLFetchError(
                 f"image host {hostname!r} resolves to non-public address {ip.compressed!r}"
             )
+        public_addresses.append(ip)
+
+    selected = min(public_addresses, key=lambda value: (value.version, int(value)))
+    host_header = f"[{hostname}]" if ":" in hostname else hostname
+    if port is not None:
+        host_header = f"{host_header}:{port}"
+    return _ValidatedDestination(
+        hostname=hostname,
+        address=selected.compressed,
+        host_header=host_header,
+    )
+
+
+def _pinned_url(url: str, destination: _ValidatedDestination) -> httpx.URL:
+    return httpx.URL(url).copy_with(host=destination.address)
+
+
+async def _read_bounded_body(response: httpx.Response) -> bytes:
+    content_length = response.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_IMAGE_BYTES:
+                raise ImageURLFetchError(f"image response exceeds {MAX_IMAGE_BYTES} bytes")
+        except ValueError:
+            pass
+
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(body) + len(chunk) > MAX_IMAGE_BYTES:
+            raise ImageURLFetchError(f"image response exceeds {MAX_IMAGE_BYTES} bytes")
+        body.extend(chunk)
+    return bytes(body)
 
 
 async def fetch_image_as_data_url(
@@ -116,28 +158,39 @@ async def fetch_image_as_data_url(
         trust_env=False,
     ) as client:
         for redirect_count in range(MAX_REDIRECTS + 1):
-            await _validate_public_destination(current_url)
+            destination = await _validate_public_destination(current_url)
+            request_headers = {"Host": destination.host_header}
+            extensions = (
+                {"sni_hostname": destination.hostname} if urlsplit(current_url).scheme == "https" else None
+            )
             try:
-                response = await client.get(current_url)
+                async with client.stream(
+                    "GET",
+                    _pinned_url(current_url, destination),
+                    headers=request_headers,
+                    extensions=extensions,
+                ) as response:
+                    if response.status_code in REDIRECT_STATUSES:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise ImageURLFetchError("image redirect is missing a Location header")
+                        if redirect_count == MAX_REDIRECTS:
+                            raise ImageURLFetchError(f"image URL exceeded {MAX_REDIRECTS} redirects")
+                        current_url = urljoin(current_url, location)
+                        continue
+
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        raise ImageURLFetchError(str(exc)) from exc
+
+                    media_type = (
+                        (response.headers.get("content-type") or "image/png").split(";", 1)[0].strip()
+                    )
+                    content = await _read_bounded_body(response)
             except httpx.HTTPError as exc:
                 raise ImageURLFetchError(str(exc)) from exc
-
-            if response.status_code in REDIRECT_STATUSES:
-                location = response.headers.get("location")
-                if not location:
-                    raise ImageURLFetchError("image redirect is missing a Location header")
-                if redirect_count == MAX_REDIRECTS:
-                    raise ImageURLFetchError(f"image URL exceeded {MAX_REDIRECTS} redirects")
-                current_url = urljoin(str(response.url), location)
-                continue
-
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                raise ImageURLFetchError(str(exc)) from exc
-
-            media_type = (response.headers.get("content-type") or "image/png").split(";", 1)[0].strip()
-            encoded = base64.b64encode(response.content).decode()
+            encoded = base64.b64encode(content).decode()
             return f"data:{media_type};base64,{encoded}"
 
     raise ImageURLFetchError(f"image URL exceeded {MAX_REDIRECTS} redirects")  # pragma: no cover

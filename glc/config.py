@@ -42,7 +42,7 @@ def install_token_path() -> Path:
     return CONFIG_DIR / "install_token"
 
 
-def get_or_create_install_token() -> str:
+def get_or_create_install_token(*, production: bool | None = None) -> str:
     """Return the gateway control token.
 
     Production receives the token from its gateway-only container Secret and
@@ -56,7 +56,10 @@ def get_or_create_install_token() -> str:
             raise RuntimeError(f"{INSTALL_TOKEN_ENV} is configured but empty")
         return token
 
-    if os.getenv("GLC_ENV", "").strip().lower() == "production":
+    is_production = (
+        os.getenv("GLC_ENV", "").strip().lower() == "production" if production is None else production
+    )
+    if is_production:
         raise RuntimeError(f"{INSTALL_TOKEN_ENV} is required in production")
 
     p = install_token_path()

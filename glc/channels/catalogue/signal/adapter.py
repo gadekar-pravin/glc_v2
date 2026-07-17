@@ -73,7 +73,7 @@ class Adapter(ChannelAdapter):
 
         metadata: dict[str, Any] = {
             "is_public_channel": bool(self.config.get("is_public_channel", False)),
-            "was_mentioned": bool(self.config.get("was_mentioned", False)),
+            "was_mentioned": False,
         }
         if group_id:
             metadata["signal_group_id"] = group_id

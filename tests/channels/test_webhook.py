@@ -105,7 +105,9 @@ async def test_allowlist_silently_drops_stranger_in_public(mock):
     adapter = Adapter(config={"mock": mock, "is_public_channel": True})
     ev = mock.queue_stranger_message("hi from public")
     msg = await adapter.on_message(ev)
-    assert msg is None or msg.trust_level is None
+    assert isinstance(msg, ChannelIngress)
+    assert msg.metadata["is_public_channel"] is True
+    assert msg.metadata["was_mentioned"] is False
 
 
 @pytest.mark.asyncio

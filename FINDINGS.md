@@ -243,7 +243,7 @@ The Telegram-only deployment on 2026-07-17 started named Sandbox
 `sb-CJScffdYiJUaRjAZWCTDM5`; two reconciliations returned that same running ID. The final clean-commit
 probe Sandbox `sb-Rr9L6B5kXI4cTGMv6rAshm` reported the exact allowlist
 `["api.telegram.org", "pbgadekar--glc-v1-gateway-fastapi-app.modal.run"]`, reached Telegram and the
-gateway, and reported `non_allowlisted_domain_blocked=true`. Modal's system stream recorded
+gateway, and reported `non_allowlisted_domain_unreachable=true`. Modal's system stream separately recorded
 `blocking all outbound connections to example.com (not on allow-list)` at 09:55:22 IST. The same
 proof reported every provider key absent, no install token file or environment value, no ledger
 signing key/package/API, no pairing mutation API, forged-owner rejection, first/intended chat

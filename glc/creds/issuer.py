@@ -16,6 +16,7 @@ ALGORITHM = "HS256"
 ISSUER = "glc-gateway"
 AUDIENCE = "glc-tools"
 DEFAULT_TTL_SECONDS = 300
+MODEL_SCOPED_TOOLS = frozenset({"llm.chat", "llm.chat.batch", "llm.vision"})
 
 
 def signing_key() -> str:
@@ -44,6 +45,8 @@ def issue_token(
 ) -> IssuedToken:
     if tool not in SUPPORTED_TOOLS:
         raise ValueError(f"unsupported tool {tool!r}")
+    if model is not None and tool not in MODEL_SCOPED_TOOLS:
+        raise ValueError(f"tool {tool!r} does not support model-scoped credentials")
     if tool not in slot.allowed_tools:
         raise PermissionError(f"slot {slot.name!r} is not allowed to request {tool!r}")
     if ttl_seconds <= 0 or ttl_seconds > DEFAULT_TTL_SECONDS:

@@ -3,10 +3,16 @@ defaults, hot reload, malformed-yaml safe default."""
 
 from __future__ import annotations
 
+import asyncio
 import os
+import subprocess
+import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from textwrap import dedent
+
+import pytest
 
 from glc.policy.client import PolicyWorkerError, ProcessPolicyClient
 from glc.policy.engine import PolicyEngine
@@ -365,6 +371,58 @@ def test_policy_worker_timeout_fails_closed(monkeypatch):
     assert verdict.reason == "policy worker unavailable"
     assert not client.ping()
     client.close()
+
+
+def test_policy_worker_partial_line_still_obeys_timeout():
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            "import sys,time; sys.stdout.write('{'); sys.stdout.flush(); time.sleep(1)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    client = ProcessPolicyClient(operation_timeout=0.05)
+    client._process = process
+    try:
+        with pytest.raises(PolicyWorkerError, match="timed out"):
+            client._exchange_locked("ping", timeout=0.05)
+    finally:
+        client._terminate_locked()
+
+
+@pytest.mark.asyncio
+async def test_sighup_handler_schedules_reload_outside_signal_context(monkeypatch):
+    import glc.main as main_module
+
+    installed = {}
+    reload_threads = []
+
+    class StubPolicyClient:
+        def reload(self):
+            reload_threads.append(threading.get_ident())
+            return True
+
+    monkeypatch.setattr(
+        main_module.signal,
+        "signal",
+        lambda signal_number, handler: installed.update(handler=handler),
+    )
+
+    main_module._install_sighup_reload(StubPolicyClient())
+    installed["handler"](None, None)
+    assert reload_threads == []
+
+    for _ in range(50):
+        if reload_threads:
+            break
+        await asyncio.sleep(0.01)
+
+    assert reload_threads
+    assert reload_threads[0] != threading.get_ident()
 
 
 def test_gateway_health_fails_when_policy_worker_dies(app_client):

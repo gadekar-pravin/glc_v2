@@ -155,6 +155,11 @@ async def _classify_tier(req, role, router_pool, prompt_text, ledger):
             if tier == "HUGE" and estimated <= 8000:
                 tier = "LARGE"
             if tier is None:
+                logger.warning(
+                    "Router provider returned an unparseable tier (provider=%s, reply=%r)",
+                    name,
+                    result.get("text", "")[:100],
+                )
                 ledger.log_call(
                     provider=name,
                     model=result.get("model", provider.model),
@@ -162,7 +167,7 @@ async def _classify_tier(req, role, router_pool, prompt_text, ledger):
                     output_tokens=result.get("output_tokens", 0),
                     latency_ms=latency,
                     status="error",
-                    error=f"unparseable tier reply: {result.get('text', '')[:100]}",
+                    error=PUBLIC_UPSTREAM_ERROR,
                     prompt_chars=len(envelope),
                     call_role=call_role,
                     router_decision="unparseable",
@@ -189,14 +194,15 @@ async def _classify_tier(req, role, router_pool, prompt_text, ledger):
                 router_latency_ms=latency,
                 fallback_used=False,
             )
-        except Exception as e:
+        except Exception:
             latency = int((time.time() - t0) * 1000)
             last_latency = latency
+            logger.exception("Router provider request failed (provider=%s)", name)
             ledger.log_call(
                 provider=name,
                 model=provider.model,
                 status="error",
-                error=str(e)[:500],
+                error=PUBLIC_UPSTREAM_ERROR,
                 latency_ms=latency,
                 call_role=call_role,
                 router_decision="error",
@@ -274,6 +280,25 @@ def _backoff_for(err: Exception, has_model_override: bool = False):
 
 def _attempts_str(attempts):
     return "; ".join(f"{a['provider']}:{a['reason']}" for a in attempts)
+
+
+def _public_attempts(attempts):
+    return [
+        {**attempt, "reason": PUBLIC_UPSTREAM_ERROR}
+        if isinstance(attempt, dict) and attempt.get("reason")
+        else attempt
+        for attempt in attempts
+    ]
+
+
+def _sanitize_persisted_attempted(value):
+    if not isinstance(value, str) or not value:
+        return value
+    sanitized = []
+    for attempt in value.split("; "):
+        provider, separator, _reason = attempt.partition(":")
+        sanitized.append(f"{provider}:{PUBLIC_UPSTREAM_ERROR}" if separator else PUBLIC_UPSTREAM_ERROR)
+    return "; ".join(sanitized)
 
 
 def _required_caps(req: ChatRequest):
@@ -714,7 +739,8 @@ async def embed(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ):
-    authorize_tool_request(request, authorization, tool="llm.embed")
+    principal = authorize_tool_request(request, authorization, tool="llm.embed")
+    accounting_agent = principal.slot if principal.kind == "slot" else None
     from glc import embedders as E
 
     state = request.app.state
@@ -737,24 +763,27 @@ async def embed(
         )
     except E.EmbedderError as e:
         latency = int((time.time() - t0) * 1000)
+        logger.exception("Embedding provider request failed (provider=%s)", req.provider or "(any)")
         request.app.state.ledger.log_call(
             provider=req.provider or "(any)",
             model="(none)",
             status="error",
-            error=str(e)[:500],
+            error=PUBLIC_UPSTREAM_ERROR,
             latency_ms=latency,
             prompt_chars=len(req.text),
             override=req.provider,
             call_role="embed",
+            agent=accounting_agent,
         )
         if req.provider:
             if e.status == 429:
-                raise HTTPException(429, f"{req.provider} rate-limited: {e}")
+                raise HTTPException(429, PUBLIC_UPSTREAM_ERROR)
             if e.status == 400:
-                raise HTTPException(400, str(e))
-            raise HTTPException(502, f"{req.provider} embed failed: {e}")
-        raise HTTPException(503, str(e))
+                raise HTTPException(400, PUBLIC_UPSTREAM_ERROR)
+            raise HTTPException(502, PUBLIC_UPSTREAM_ERROR)
+        raise HTTPException(503, PUBLIC_UPSTREAM_ERROR)
 
+    public_attempts = _public_attempts(attempts)
     request.app.state.ledger.log_call(
         provider=name,
         model=result["model"],
@@ -762,9 +791,10 @@ async def embed(
         latency_ms=latency,
         prompt_chars=len(req.text),
         override=req.provider,
-        attempted=_attempts_str(attempts),
+        attempted=_attempts_str(public_attempts),
         call_role="embed",
         embed_dim=result["dim"],
+        agent=accounting_agent,
     )
     return EmbedResponse(
         provider=name,
@@ -772,7 +802,7 @@ async def embed(
         embedding=result["embedding"],
         dim=result["dim"],
         latency_ms=latency,
-        attempted=attempts,
+        attempted=public_attempts,
     ).model_dump()
 
 
@@ -876,4 +906,6 @@ async def calls(
     for row in rows:
         if row.get("error"):
             row["error"] = PUBLIC_UPSTREAM_ERROR
+        if row.get("attempted"):
+            row["attempted"] = _sanitize_persisted_attempted(row["attempted"])
     return rows

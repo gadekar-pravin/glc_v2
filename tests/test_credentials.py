@@ -31,6 +31,7 @@ def credential_client(monkeypatch, tmp_path):
         lambda: {"channels": {"telegram": {"enabled": True, "allowed_senders": []}}},
     )
     monkeypatch.setenv("GLC_CREDS_SIGNING_KEY", "test-signing-key-not-a-provider-key")
+    monkeypatch.setenv("GLC_INSTALL_TOKEN", "credential-test-install-token")
     monkeypatch.setenv("GLC_SLOT_IDENTITY_TELEGRAM", "telegram-identity")
     monkeypatch.setenv("GLC_SLOT_IDENTITY_LOCAL_MIC", "local-mic-identity")
     with TestClient(create_app(production=True)) as client:
@@ -64,6 +65,25 @@ def test_issue_derives_slot_and_enforces_manifest_scope(credential_client):
 
     disallowed = _issue(credential_client, tool="tts.synthesize")
     assert disallowed.status_code == 403
+
+
+@pytest.mark.parametrize("tool", ["llm.embed", "stt.transcribe", "tts.synthesize"])
+def test_issue_rejects_model_scope_for_tools_without_model_semantics(credential_client, tool):
+    slot = replace(get_slot("telegram"), allowed_tools=(tool,))
+    with pytest.raises(ValueError, match="does not support model-scoped"):
+        issue_token(slot=slot, tool=tool, model="unsupported-model")
+
+
+@pytest.mark.parametrize("tool", ["stt.transcribe", "tts.synthesize"])
+def test_issue_route_returns_400_for_unsupported_model_scope(credential_client, tool):
+    response = _issue(
+        credential_client,
+        identity="local-mic-identity",
+        tool=tool,
+        model="unsupported-model",
+    )
+    assert response.status_code == 400
+    assert "does not support model-scoped" in response.json()["detail"]
 
 
 def test_correct_scope_consumes_once_and_replay_fails(credential_client):
@@ -115,6 +135,30 @@ def test_slot_cannot_forge_cost_ledger_agent(credential_client):
     rows = credential_client.app.state.ledger.recent(limit=10)
     assert rows[0]["agent"] == "telegram"
     assert all(row["agent"] != "victim" for row in rows)
+
+
+def test_embed_cost_is_attributed_to_authenticated_slot(credential_client):
+    from glc.embedders import EmbeddingProvider, EmbedRateState
+
+    class FakeEmbedder(EmbeddingProvider):
+        name = "fake"
+        model = "fake-embedding-model"
+        state = EmbedRateState(rpm=0, cooldown=0)
+
+        async def embed(self, text, task_type):  # noqa: ARG002
+            return {"embedding": [0.25, 0.75], "model": self.model, "dim": 2}
+
+    credential_client.app.state.embedders = [FakeEmbedder()]
+    slot = replace(get_slot("telegram"), allowed_tools=("llm.embed",))
+    issued = issue_token(slot=slot, tool="llm.embed")
+    response = credential_client.post(
+        "/v1/embed",
+        json={"text": "slot-owned embedding"},
+        headers={"Authorization": f"Bearer {issued.access_token}"},
+    )
+
+    assert response.status_code == 200
+    assert credential_client.app.state.ledger.recent(limit=1)[0]["agent"] == "telegram"
 
 
 def test_wrong_scope_does_not_consume_intended_grant(credential_client):
@@ -300,6 +344,25 @@ def test_atomic_consume_allows_only_one_concurrent_winner(credential_client):
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert sorted(pool.map(lambda _: attempt(), range(2))) == [False, True]
+
+
+def test_credential_expiration_boundary_is_exclusive(credential_client):
+    db.register_credential(
+        jti="boundary-jti",
+        slot="telegram",
+        tool="llm.chat",
+        model=None,
+        issued_at=100,
+        expires_at=101,
+    )
+
+    assert not db.consume_credential(
+        jti="boundary-jti",
+        slot="telegram",
+        tool="llm.chat",
+        model=None,
+        now=101,
+    )
 
 
 def test_forged_and_expired_tokens_fail_closed(credential_client, monkeypatch):

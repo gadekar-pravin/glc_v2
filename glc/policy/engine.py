@@ -1,8 +1,8 @@
 """Pure declarative policy evaluator used by the isolated policy worker.
 
 evaluate(tool_call, context) -> PolicyVerdict
-  - first matching rule wins
-  - ties resolve to deny
+  - any matching deny takes precedence over matching allows, regardless of order
+  - otherwise the first matching rule wins
   - default allow when trust_level == 'owner_paired' and no rule matches
   - default deny otherwise
 

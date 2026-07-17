@@ -11,7 +11,7 @@ import os
 import time
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Any, cast
+from typing import Any
 
 import httpx
 
@@ -47,27 +47,27 @@ class Adapter(ChannelAdapter):
         expected = hmac.new(secret.encode(), signed, sha256).hexdigest()
         return hmac.compare_digest(expected, received)
 
-    async def on_message(self, raw: Any) -> ChannelIngress:
+    async def on_message(self, raw: Any) -> ChannelIngress | None:
         mock = self.config.get("mock")
         if mock is not None and hasattr(mock, "pop_disconnect") and mock.pop_disconnect():
-            return cast(ChannelIngress, None)
+            return None
 
         if not isinstance(raw, dict):
-            return cast(ChannelIngress, None)
+            return None
 
         raw_body = raw.get("raw_body")
         headers = raw.get("headers")
         if not isinstance(raw_body, bytes) or not isinstance(headers, dict):
-            return cast(ChannelIngress, None)
+            return None
 
         normalized_headers = {str(k): str(v) for k, v in headers.items()}
         if not self._verify(raw_body, normalized_headers):
-            return cast(ChannelIngress, None)
+            return None
 
         try:
             inbound = WebhookInbound.model_validate_json(raw_body)
         except Exception:
-            return cast(ChannelIngress, None)
+            return None
 
         channel = self.name
         is_public_channel = bool(self.config.get("is_public_channel", False))

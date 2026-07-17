@@ -66,22 +66,22 @@ def _parse(raw: dict) -> Slot:
     if kind not in {"channel", "voice"}:
         raise RuntimeError(f"slot {name!r} has invalid kind {kind!r}")
     identity_env = f"GLC_SLOT_IDENTITY_{name.upper()}"
-    tools = tuple(raw.get("allowed_tools", ()))
+    tools = tuple(raw.get("allowed_tools") or ())
     unsupported = set(tools) - SUPPORTED_TOOLS
     if unsupported:
         raise RuntimeError(f"slot {name!r} has unsupported tools {sorted(unsupported)}")
-    secret_keys = tuple(raw.get("secret_keys", ()))
+    secret_keys = tuple(raw.get("secret_keys") or ())
     gateway_only = GATEWAY_ONLY_SECRET_KEYS.intersection(secret_keys)
     if gateway_only:
         raise RuntimeError(f"slot {name!r} must not receive gateway-only secrets {sorted(gateway_only)}")
     if kind == "channel" and PROVIDER_SECRET_KEYS.intersection(secret_keys):
         raise RuntimeError(f"channel slot {name!r} must not receive LLM provider keys")
-    egress_domains = tuple(raw.get("egress_domains", ()))
+    egress_domains = tuple(raw.get("egress_domains") or ())
     if egress_domains:
         from glc.isolation.egress import validate_egress_domains
 
         egress_domains = validate_egress_domains(egress_domains)
-    resources = raw.get("resources", {})
+    resources = raw.get("resources") or {}
     return Slot(
         name=name,
         kind=kind,  # type: ignore[arg-type]
@@ -101,7 +101,7 @@ def _parse(raw: dict) -> Slot:
 @lru_cache(maxsize=1)
 def all_slots() -> tuple[Slot, ...]:
     data = yaml.safe_load(_PATH.read_text()) or {}
-    slots = tuple(_parse(entry) for entry in data.get("slots", ()))
+    slots = tuple(_parse(entry) for entry in (data.get("slots") or ()))
     names = [slot.name for slot in slots]
     if len(slots) != 22:
         raise RuntimeError(f"expected 22 isolated slots, found {len(slots)}")

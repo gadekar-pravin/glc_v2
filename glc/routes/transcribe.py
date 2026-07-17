@@ -38,6 +38,12 @@ async def transcribe_route(
     authorization: Annotated[str | None, Header()] = None,
 ):
     authorize_tool_request(request, authorization, tool="stt.transcribe")
+    if req.prefer == "streaming":
+        raise HTTPException(
+            400,
+            "streaming STT is not exposed through POST /v1/transcribe. "
+            "Open a Gemini Live WebSocket session (S12 deliverable).",
+        )
     try:
         audio = base64.b64decode(req.audio_b64)
     except Exception as e:
@@ -48,8 +54,6 @@ async def transcribe_route(
         else:
             r = await transcribe(audio, req.mime, prefer=req.prefer)
     except STTError as e:
-        if req.prefer == "streaming":
-            raise HTTPException(400, str(e)) from e
         raise HTTPException(e.status or 502, str(e)) from e
     return TranscribeResponse(
         text=r.text,

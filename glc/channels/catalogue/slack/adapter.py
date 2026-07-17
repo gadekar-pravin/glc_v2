@@ -62,6 +62,13 @@ class Adapter(ChannelAdapter):
         thread_ts: str | None = event.get("thread_ts")
 
         is_public = self.config.get("is_public_channel", False)
+        authorizations = raw.get("authorizations", ()) if isinstance(raw, dict) else ()
+        bot_ids = {
+            str(item["user_id"]) for item in authorizations if isinstance(item, dict) and item.get("user_id")
+        }
+        was_mentioned = event.get("type") == "app_mention" or any(
+            f"<@{bot_id}>" in text for bot_id in bot_ids
+        )
 
         return ChannelIngress(
             channel="slack",
@@ -73,7 +80,7 @@ class Adapter(ChannelAdapter):
             metadata={
                 "slack_channel_id": channel_id,
                 "is_public_channel": bool(is_public),
-                "was_mentioned": bool(self.config.get("was_mentioned", False)),
+                "was_mentioned": was_mentioned,
             },
         )
 

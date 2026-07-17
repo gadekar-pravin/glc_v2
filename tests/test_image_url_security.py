@@ -86,6 +86,9 @@ async def test_public_image_is_converted_to_data_url(monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["accept"].startswith("image/")
+        assert request.url.host == "93.184.216.34"
+        assert request.headers["host"] == "images.test"
+        assert request.extensions["sni_hostname"] == "images.test"
         return httpx.Response(200, content=image, headers={"content-type": "image/gif; charset=binary"})
 
     result = await image_urls.fetch_image_as_data_url(
@@ -147,7 +150,7 @@ async def test_redirect_destination_is_revalidated_before_second_request(monkeyp
             transport=httpx.MockTransport(handler),
         )
 
-    assert requested_urls == ["https://images.test/start"]
+    assert requested_urls == ["https://93.184.216.34/start"]
     assert resolver_calls == [("images.test", 443), ("internal.test", 80)]
 
 
@@ -169,7 +172,7 @@ async def test_public_relative_redirect_is_followed(monkeypatch):
     )
 
     assert result == f"data:image/png;base64,{base64.b64encode(b'png').decode()}"
-    assert requested_urls == ["https://images.test/start", "https://images.test/final.png"]
+    assert requested_urls == ["https://93.184.216.34/start", "https://93.184.216.34/final.png"]
     assert resolver_calls == [("images.test", 443), ("images.test", 443)]
 
 
@@ -190,6 +193,31 @@ async def test_redirect_count_is_bounded(monkeypatch):
         )
 
     assert requests == image_urls.MAX_REDIRECTS + 1
+
+
+async def test_streamed_image_body_is_bounded(monkeypatch):
+    monkeypatch.setenv("GLC_IMAGE_URL_ALLOWED_HOSTS", "images.test")
+    monkeypatch.setattr(image_urls, "MAX_IMAGE_BYTES", 5)
+    _set_resolver(monkeypatch, {"images.test": ("93.184.216.34",)})
+
+    class OversizedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"123"
+            yield b"456"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=OversizedStream(),
+            headers={"content-type": "image/png"},
+            request=request,
+        )
+
+    with pytest.raises(image_urls.ImageURLFetchError, match="exceeds 5 bytes"):
+        await image_urls.fetch_image_as_data_url(
+            "https://images.test/image.png",
+            transport=httpx.MockTransport(handler),
+        )
 
 
 @pytest.mark.parametrize(

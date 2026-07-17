@@ -49,6 +49,8 @@ async def creds_issue(
         token = issue_token(slot=slot, tool=req.tool, model=req.model)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     return CredsIssueResponse(
         access_token=token.access_token,
         expires_at=token.expires_at,

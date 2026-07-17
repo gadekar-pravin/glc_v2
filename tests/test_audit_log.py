@@ -269,6 +269,23 @@ def test_missing_trigger_fails_closed():
         init_store()
 
 
+def test_same_named_noop_trigger_fails_closed():
+    init_store()
+    with _raw_connection() as connection:
+        connection.execute("DROP TRIGGER audit_log_no_delete")
+        connection.execute(
+            """CREATE TRIGGER audit_log_no_delete
+               BEFORE DELETE ON audit_log
+               BEGIN
+                   SELECT 1;
+               END"""
+        )
+
+    assert not verify_chain()
+    with pytest.raises(AuditIntegrityError, match="triggers"):
+        init_store()
+
+
 def test_unsupported_schema_version_fails_closed():
     init_store()
     with _raw_connection() as connection:

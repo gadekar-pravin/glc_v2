@@ -124,6 +124,10 @@ class Adapter(ChannelAdapter):
 
         event = raw["events"][0]
         message = event["message"]
+        mentionees = (message.get("mention") or {}).get("mentionees") or ()
+        was_mentioned = any(
+            isinstance(mentionee, dict) and mentionee.get("isSelf") is True for mentionee in mentionees
+        )
         parsed = LineEvent.model_validate(
             {
                 "user_id": event["source"]["userId"],
@@ -147,7 +151,7 @@ class Adapter(ChannelAdapter):
             arrived_at=datetime.now(UTC),
             metadata={
                 "is_public_channel": bool(self.config.get("is_public_channel", False)),
-                "was_mentioned": bool(self.config.get("was_mentioned", False)),
+                "was_mentioned": was_mentioned,
             },
         )
 

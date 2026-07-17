@@ -62,6 +62,14 @@ async def test_on_message_stranger_is_untrusted(mock):
 
 
 @pytest.mark.asyncio
+async def test_config_cannot_spoof_signal_mention_state(mock):
+    adapter = Adapter(config={"mock": mock, "was_mentioned": True})
+    msg = await adapter.on_message(mock.queue_stranger_message("not a mention"))
+    assert msg is not None
+    assert msg.metadata["was_mentioned"] is False
+
+
+@pytest.mark.asyncio
 async def test_send_emits_valid_wire_payload(mock, pair_owner):
     """JSON-RPC `send` shape: `{jsonrpc:"2.0", id, method:"send",
     params:{recipient|groupId, message}}`. Adapters that forget the

@@ -63,7 +63,7 @@ def register_credential(
     expires_at: int,
 ) -> None:
     with conn() as c:
-        c.execute("DELETE FROM issued_credentials WHERE expires_at < ?", (issued_at,))
+        c.execute("DELETE FROM issued_credentials WHERE expires_at <= ?", (issued_at,))
         c.execute(
             """INSERT INTO issued_credentials
                (jti_hash, slot, tool, model, issued_at, expires_at, used_at)
@@ -79,7 +79,7 @@ def consume_credential(*, jti: str, slot: str, tool: str, model: str | None, now
         cursor = c.execute(
             """UPDATE issued_credentials SET used_at = ?
                WHERE jti_hash = ? AND slot = ? AND tool = ?
-                 AND model IS ? AND used_at IS NULL AND expires_at >= ?""",
+                 AND model IS ? AND used_at IS NULL AND expires_at > ?""",
             (now, _jti_hash(jti), slot, tool, model, now),
         )
         return cursor.rowcount == 1

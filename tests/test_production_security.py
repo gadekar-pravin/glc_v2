@@ -11,7 +11,8 @@ from glc.main import create_app
 
 
 @pytest.fixture
-def production_client():
+def production_client(monkeypatch):
+    monkeypatch.setenv("GLC_INSTALL_TOKEN", "production-test-install-token")
     with TestClient(create_app(production=True)) as client:
         yield client
 
@@ -73,6 +74,17 @@ def test_gateway_auth_covers_api_control_and_webhook_routes(production_client, p
         json={"channel": "telegram", "channel_user_id": "1"},
     )
     assert control.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/v1/chat", "/v1/chat/batch", "/v1/vision", "/v1/embed", "/v1/creds/issue"],
+)
+def test_scoped_routes_authenticate_before_body_validation(production_client, path):
+    response = production_client.post(path, json={})
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert "field required" not in response.text.lower()
 
 
 def test_production_index_does_not_advertise_docs(production_client, production_auth):

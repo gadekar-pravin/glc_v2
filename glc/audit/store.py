@@ -135,6 +135,37 @@ def _trigger_names(c: sqlite3.Connection) -> set[str]:
     }
 
 
+def _canonical_sql(value: str) -> str:
+    return " ".join(value.rstrip(";").split()).casefold()
+
+
+_EXPECTED_TRIGGER_DEFINITIONS = {
+    "audit_log_no_update": _canonical_sql(
+        """CREATE TRIGGER audit_log_no_update
+        BEFORE UPDATE ON audit_log
+        BEGIN
+            SELECT RAISE(ABORT, 'audit_log is append-only');
+        END"""
+    ),
+    "audit_log_no_delete": _canonical_sql(
+        """CREATE TRIGGER audit_log_no_delete
+        BEFORE DELETE ON audit_log
+        BEGIN
+            SELECT RAISE(ABORT, 'audit_log is append-only');
+        END"""
+    ),
+}
+
+
+def _trigger_definitions(c: sqlite3.Connection) -> dict[str, str]:
+    return {
+        str(row["name"]): _canonical_sql(str(row["sql"]))
+        for row in c.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='audit_log'"
+        )
+    }
+
+
 def _canonical_hash(row: Mapping[str, Any], prev_hash: str) -> str:
     payload = [_CHAIN_DOMAIN, *(row[field] for field in _HASHED_FIELDS), prev_hash]
     encoded = json.dumps(
@@ -171,7 +202,7 @@ def _validate_v2(c: sqlite3.Connection) -> None:
     versions = _schema_versions(c)
     if not versions or max(versions) != SCHEMA_VERSION or any(v < 1 or v > SCHEMA_VERSION for v in versions):
         raise AuditIntegrityError("unsupported audit schema version")
-    if _trigger_names(c) != _TRIGGER_NAMES:
+    if _trigger_names(c) != _TRIGGER_NAMES or _trigger_definitions(c) != _EXPECTED_TRIGGER_DEFINITIONS:
         raise AuditIntegrityError("append-only audit triggers are missing or unexpected")
     if not _verify_chain_conn(c):
         raise AuditIntegrityError("audit hash chain verification failed")

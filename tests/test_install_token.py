@@ -50,3 +50,14 @@ def test_local_development_retains_file_backed_token(monkeypatch):
     assert install_token_path().read_text() == first
     assert len(first) == 43
     assert stat.S_IMODE(install_token_path().stat().st_mode) == 0o600
+
+
+def test_explicit_production_mode_is_authoritative(monkeypatch):
+    install_token_path().write_text("legacy-token-must-not-be-used")
+    monkeypatch.delenv("GLC_INSTALL_TOKEN", raising=False)
+    monkeypatch.delenv("GLC_ENV", raising=False)
+
+    with pytest.raises(RuntimeError, match="GLC_INSTALL_TOKEN"):
+        get_or_create_install_token(production=True)
+
+    assert get_or_create_install_token(production=False) == "legacy-token-must-not-be-used"

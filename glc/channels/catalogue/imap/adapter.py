@@ -147,8 +147,8 @@ class Adapter(ChannelAdapter):
           - {"uid": int, "raw": bytes}   — standard IMAP FETCH dict
           - bare bytes                   — direct injection (tests)
 
-        Returns None on empty input, unparseable MIME, or when an
-        untrusted sender is silently dropped in public-channel mode.
+        Returns None on empty input or unparseable MIME. Valid ingress is
+        always emitted for gateway-side trust and allowlist classification.
         """
         # Transparent IDLE/disconnect handling: the IDLE connection can
         # drop without notice. Consuming the disconnect signal here lets

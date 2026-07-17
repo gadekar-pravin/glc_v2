@@ -56,6 +56,16 @@ async def test_on_message_stranger_is_untrusted(mock):
 
 
 @pytest.mark.asyncio
+async def test_client_cannot_spoof_webui_mention_state(mock):
+    adapter = Adapter(config={"mock": mock, "is_public_channel": True})
+    event = mock.queue_stranger_message("not a mention")
+    event["was_mentioned"] = True
+    msg = await adapter.on_message(event)
+    assert msg is not None
+    assert msg.metadata["was_mentioned"] is False
+
+
+@pytest.mark.asyncio
 async def test_send_emits_valid_wire_payload(mock, pair_owner):
     """A reply produces an `agent_reply` frame. The behavioural test
     asserts the typing pre-frame; this test asserts the final frame

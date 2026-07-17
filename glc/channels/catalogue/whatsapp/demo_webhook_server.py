@@ -133,18 +133,23 @@ class Handler(BaseHTTPRequestHandler):
         raw_body = self.rfile.read(length)
         headers = dict(self.headers.items())
 
-        asyncio.run(self._handle_inbound(raw_body, headers))
+        try:
+            response_status = asyncio.run(self._handle_inbound(raw_body, headers))
+        except Exception as exc:
+            print(f"[demo] gateway relay failed with {type(exc).__name__}; requesting retry")
+            response_status = 503
 
-        self.send_response(200)
+        self.send_response(response_status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"status":"ok"}')
+        body = b'{"status":"ok"}' if response_status == 200 else b'{"status":"retry"}'
+        self.wfile.write(body)
 
-    async def _handle_inbound(self, raw_body: bytes, headers: dict[str, str]) -> None:
+    async def _handle_inbound(self, raw_body: bytes, headers: dict[str, str]) -> int:
         msg = await adapter.on_message({"raw_body": raw_body, "headers": headers})
         if msg is None:
             print(f"[demo] dropped: {_classify_drop_reason(raw_body, headers)}")
-            return
+            return 200
 
         print(
             f"[demo] inbound provider={msg.metadata.get('provider')} "
@@ -154,9 +159,15 @@ class Handler(BaseHTTPRequestHandler):
         reply = await _gateway_roundtrip(msg)
         if isinstance(reply, dict):
             print(f"[demo] gateway decision: {reply}")
-            return
+            status = reply.get("status")
+            if status == 429:
+                return 429
+            if isinstance(status, int) and status >= 500:
+                return status
+            return 200
         result = await adapter.send(reply)
         print(f"[demo] send() result: {result}")
+        return 200
 
     def log_message(self, fmt, *args):  # silence default access log noise
         pass

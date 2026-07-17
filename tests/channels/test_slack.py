@@ -100,7 +100,24 @@ async def test_allowlist_silently_drops_stranger_in_public(mock):
     adapter = Adapter(config={"mock": mock, "is_public_channel": True})
     ev = mock.queue_stranger_message("hi from public")
     msg = await adapter.on_message(ev)
-    assert msg is None or msg.trust_level is None
+    assert isinstance(msg, ChannelIngress)
+    assert msg.metadata["is_public_channel"] is True
+    assert msg.metadata["was_mentioned"] is False
+
+
+@pytest.mark.asyncio
+async def test_was_mentioned_is_derived_from_event_not_config(mock):
+    adapter = Adapter(config={"mock": mock, "was_mentioned": True})
+    ordinary = mock.queue_stranger_message("ordinary message")
+    ordinary_msg = await adapter.on_message(ordinary)
+    assert ordinary_msg is not None
+    assert ordinary_msg.metadata["was_mentioned"] is False
+
+    mentioned = mock.queue_stranger_message("hello bot")
+    mentioned["event"]["type"] = "app_mention"
+    mentioned_msg = await adapter.on_message(mentioned)
+    assert mentioned_msg is not None
+    assert mentioned_msg.metadata["was_mentioned"] is True
 
 
 @pytest.mark.asyncio

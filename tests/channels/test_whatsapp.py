@@ -12,6 +12,7 @@ trust the payload, so the envelope must not be constructed at all.
 
 from __future__ import annotations
 
+import io
 from datetime import datetime
 
 import pytest
@@ -144,3 +145,25 @@ async def test_channel_specific_behaviour_signature_verification(mock, pair_owne
     out = await adapter.on_message({"raw_body": raw, "headers": headers})
     assert isinstance(out, ChannelIngress)
     assert out.text == "valid probe"
+
+
+def test_demo_webhook_returns_retryable_gateway_status(monkeypatch):
+    import glc.channels.catalogue.whatsapp.demo_webhook_server as demo
+
+    async def rate_limited(self, raw_body, headers):  # noqa: ARG001
+        return 429
+
+    monkeypatch.setattr(demo.Handler, "_handle_inbound", rate_limited)
+    handler = object.__new__(demo.Handler)
+    handler.headers = {"Content-Length": "2"}
+    handler.rfile = io.BytesIO(b"{}")
+    handler.wfile = io.BytesIO()
+    response_codes = []
+    handler.send_response = response_codes.append
+    handler.send_header = lambda *args: None
+    handler.end_headers = lambda: None
+
+    handler.do_POST()
+
+    assert response_codes == [429]
+    assert handler.wfile.getvalue() == b'{"status":"retry"}'

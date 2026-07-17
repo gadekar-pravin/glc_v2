@@ -104,6 +104,79 @@ async def test_allowlist_silently_drops_stranger_in_public(mock):
 
 
 @pytest.mark.asyncio
+async def test_was_mentioned_is_derived_from_line_event(mock):
+    adapter = Adapter(config={"mock": mock, "was_mentioned": True})
+    ordinary = mock.queue_stranger_message("ordinary message")
+    ordinary_msg = await adapter.on_message(ordinary)
+    assert ordinary_msg is not None
+    assert ordinary_msg.metadata["was_mentioned"] is False
+
+    mentioned = mock.queue_stranger_message("hello bot")
+    mentioned["events"][0]["message"]["mention"] = {
+        "mentionees": [{"index": 0, "length": 3, "type": "user", "isSelf": True}]
+    }
+    mentioned_msg = await adapter.on_message(mentioned)
+    assert mentioned_msg is not None
+    assert mentioned_msg.metadata["was_mentioned"] is True
+
+
+def test_live_bridge_rejects_plaintext_remote_gateway_urls():
+    from glc.channels.catalogue.line.dev.live_bridge import BridgeConfig
+
+    with pytest.raises(ValueError, match="must use wss"):
+        BridgeConfig(None, None, "ws://gateway.example/v1/channels/line", "mock-identity")
+
+    BridgeConfig(None, None, "ws://127.0.0.1:8111/v1/channels/line", "mock-identity")
+    BridgeConfig(None, None, "wss://gateway.example/v1/channels/line", "mock-identity")
+
+
+@pytest.mark.asyncio
+async def test_live_bridge_drop_uses_gateway_called_key(capsys):
+    from glc.channels.catalogue.line.dev.live_bridge import BridgeConfig, handle_text_event
+
+    class DroppingAdapter:
+        async def on_message(self, raw):  # noqa: ARG002
+            return None
+
+    async def unexpected_relay(message):  # pragma: no cover
+        raise AssertionError(message)
+
+    result = await handle_text_event(
+        adapter=DroppingAdapter(),  # type: ignore[arg-type]
+        event={},
+        destination=None,
+        config=BridgeConfig(None, None, "ws://127.0.0.1:8111/v1/channels/line", "mock-identity"),
+        relay_gateway=unexpected_relay,
+    )
+
+    assert result == {"gateway_called": False, "dropped": True}
+    assert "inbound dropped before relay" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_live_bridge_does_not_log_message_or_user(mock, capsys):
+    from glc.channels.catalogue.line.dev.live_bridge import BridgeConfig, handle_text_event
+
+    async def relay(message):
+        return ChannelReply(channel="line", channel_user_id=message.channel_user_id, text="ok")
+
+    incoming = mock.queue_owner_message("private message contents")
+    result = await handle_text_event(
+        adapter=Adapter(config={"transport": mock}),
+        event=incoming["events"][0],
+        destination=incoming["destination"],
+        config=BridgeConfig(None, None, "ws://127.0.0.1:8111/v1/channels/line", "mock-identity"),
+        relay_gateway=relay,
+    )
+
+    output = capsys.readouterr().out
+    assert result["gateway_called"] is True
+    assert "private message contents" not in output
+    assert OWNER_ID not in output
+    assert "event accepted for gateway relay" in output
+
+
+@pytest.mark.asyncio
 async def test_channel_specific_behaviour_reply_token_then_push(mock, pair_owner):
     """LINE reply tokens are one-shot and quota-free; push messages
     cost against the monthly quota. The adapter must:

@@ -16,6 +16,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import websockets
@@ -31,12 +32,27 @@ DEFAULT_GATEWAY_WS_URL = "ws://127.0.0.1:8111/v1/channels/line"
 RelayGateway = Callable[[ChannelIngress], Awaitable[ChannelReply | dict[str, Any]]]
 
 
+def _validate_gateway_ws_url(url: str) -> None:
+    try:
+        parsed = urlsplit(url)
+    except ValueError as exc:
+        raise ValueError("GLC_GATEWAY_WS_URL is invalid") from exc
+    if parsed.scheme == "wss" and parsed.hostname:
+        return
+    if parsed.scheme == "ws" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        return
+    raise ValueError("GLC_GATEWAY_WS_URL must use wss:// unless it targets loopback development")
+
+
 @dataclass(frozen=True)
 class BridgeConfig:
     access_token: str | None
     channel_secret: str | None
     gateway_ws_url: str
     slot_identity: str | None
+
+    def __post_init__(self) -> None:
+        _validate_gateway_ws_url(self.gateway_ws_url)
 
     @classmethod
     def from_env(cls) -> BridgeConfig:
@@ -145,9 +161,9 @@ async def handle_text_event(
     message = await adapter.on_message({"destination": destination, "events": [event]})
     if message is None:
         print("[line] inbound dropped before relay", flush=True)
-        return {"agent_called": False, "dropped": True}
+        return {"gateway_called": False, "dropped": True}
 
-    print(f"[line] inbound user_id={message.channel_user_id} text={message.text!r}", flush=True)
+    print("[line] inbound event accepted for gateway relay", flush=True)
 
     decision = await relay_gateway(message)
     if isinstance(decision, dict):

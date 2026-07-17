@@ -87,6 +87,21 @@ def test_pinned_provider_error_is_generic_logged_and_absent_from_calls(app_clien
     assert calls.json()[0]["error"] == PUBLIC_UPSTREAM_ERROR
 
 
+def test_historical_attempted_diagnostics_are_sanitized(app_client, install_auth):
+    app_client.app.state.ledger.log_call(
+        provider="nvidia",
+        model="successful-failover-model",
+        status="ok",
+        attempted=f"gemini:{RAW_UPSTREAM_ERROR}",
+    )
+
+    calls = app_client.get("/v1/calls", headers=install_auth)
+
+    assert calls.status_code == 200
+    assert RAW_UPSTREAM_ERROR not in calls.text
+    assert calls.json()[0]["attempted"] == f"gemini:{PUBLIC_UPSTREAM_ERROR}"
+
+
 def test_exhausted_failover_error_is_generic(app_client):
     _install_router(app_client, [_failing_provider(retryable=True)])
 
@@ -163,3 +178,26 @@ def test_vision_error_is_generic(app_client):
     assert response.status_code == 502
     assert response.json() == {"detail": PUBLIC_UPSTREAM_ERROR}
     assert RAW_UPSTREAM_ERROR not in response.text
+
+
+def test_embed_error_is_generic_and_logged(app_client, caplog):
+    from glc.embedders import EmbedderError, EmbeddingProvider, EmbedRateState
+
+    class FailingEmbedder(EmbeddingProvider):
+        name = "gemini"
+        model = "gemini-embedding-test"
+        state = EmbedRateState(rpm=0, cooldown=0)
+
+        async def embed(self, text, task_type):  # noqa: ARG002
+            raise EmbedderError(RAW_UPSTREAM_ERROR, status=400)
+
+    app_client.app.state.embedders = [FailingEmbedder()]
+    caplog.set_level(logging.ERROR, logger="glc.routes.chat")
+
+    response = app_client.post("/v1/embed", json={"text": "sensitive upstream failure"})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": PUBLIC_UPSTREAM_ERROR}
+    assert RAW_UPSTREAM_ERROR not in response.text
+    assert RAW_UPSTREAM_ERROR in caplog.text
+    assert app_client.app.state.ledger.recent(limit=1)[0]["error"] == PUBLIC_UPSTREAM_ERROR

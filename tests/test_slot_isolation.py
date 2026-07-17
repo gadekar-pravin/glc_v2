@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import os
@@ -98,6 +99,27 @@ def test_manifest_rejects_gateway_only_secret_keys():
                 "secret_keys": ["GLC_INSTALL_TOKEN"],
             }
         )
+
+
+def test_manifest_handles_explicitly_empty_optional_yaml_nodes():
+    slot = _parse(
+        {
+            "name": "empty-optionals",
+            "kind": "channel",
+            "package": "glc.channels.catalogue.empty",
+            "runtime": "webhook",
+            "secret_name": "empty-secret",
+            "allowed_tools": None,
+            "secret_keys": None,
+            "egress_domains": None,
+            "resources": None,
+        }
+    )
+
+    assert slot.allowed_tools == ()
+    assert slot.secret_keys == ()
+    assert slot.egress_domains == ()
+    assert (slot.cpu, slot.memory_mb, slot.timeout_seconds) == (0.25, 256, 600)
 
 
 def test_gateway_and_telegram_image_filters_enforce_code_boundary():
@@ -324,6 +346,53 @@ async def test_runtime_network_probe_reports_allowed_and_blocked_hosts():
     }
 
 
+async def test_runtime_polling_recovers_from_transient_network_error(caplog):
+    import glc.isolation.telegram_runtime as runtime
+
+    class FailingClient:
+        async def get(self, *args, **kwargs):  # noqa: ARG002
+            raise httpx.ConnectError("offline")
+
+    offset = await runtime._poll_once(FailingClient(), runtime.Adapter(), "secret-token", 42)
+
+    assert offset == 42
+    assert "ConnectError" in caplog.text
+    assert "secret-token" not in caplog.text
+
+
+async def test_runtime_gateway_roundtrip_times_out_when_gateway_never_replies(monkeypatch):
+    import glc.isolation.telegram_runtime as runtime
+
+    class HangingWebsocket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def send(self, message):  # noqa: ARG002
+            return None
+
+        async def recv(self):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(runtime, "_identity", lambda: "mock-identity")
+    monkeypatch.setattr(runtime, "_gateway_websocket", lambda headers: HangingWebsocket())
+    monkeypatch.setattr(runtime, "GATEWAY_ROUNDTRIP_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(TimeoutError):
+        await runtime._gateway_roundtrip(runtime.Adapter(), "{}")
+
+
+def test_runtime_security_probe_uses_authenticated_channel_and_neutral_network_label():
+    import glc.isolation.telegram_runtime as runtime
+
+    source = inspect.getsource(runtime.security_probe)
+    assert '"channel": "telegram"' in source
+    assert '"non_allowlisted_domain_unreachable"' in source
+    assert '"non_allowlisted_domain_blocked"' not in source
+
+
 def test_runtime_gateway_websocket_bypasses_ambient_proxy(monkeypatch):
     import glc.isolation.telegram_runtime as runtime
 
@@ -348,11 +417,12 @@ def test_runtime_gateway_websocket_bypasses_ambient_proxy(monkeypatch):
 
 
 def test_runtime_does_not_hold_a_gateway_websocket_while_polling():
-    from glc.isolation.telegram_runtime import run
+    from glc.isolation.telegram_runtime import _poll_once, run
 
-    source = inspect.getsource(run)
-    assert "_gateway_roundtrip" in source
-    assert "async with _gateway_websocket" not in source
+    run_source = inspect.getsource(run)
+    poll_source = inspect.getsource(_poll_once)
+    assert "_gateway_roundtrip" in poll_source
+    assert "async with _gateway_websocket" not in run_source
 
 
 def test_adapter_process_environment_does_not_inherit_gateway_provider_keys(tmp_path):

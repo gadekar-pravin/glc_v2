@@ -45,11 +45,31 @@ def _install_sighup_reload(policy_client: ProcessPolicyClient) -> None:
     if not hasattr(signal, "SIGHUP"):
         return
 
+    loop = asyncio.get_running_loop()
+    reload_scheduled = False
+    reload_task: asyncio.Task[None] | None = None
+
+    async def _reload() -> None:
+        nonlocal reload_scheduled, reload_task
+        try:
+            reloaded = await asyncio.to_thread(policy_client.reload)
+            if reloaded:
+                print("[glc] policy.yaml reloaded via SIGHUP")
+            else:
+                print("[glc] SIGHUP reload failed: policy worker unavailable")
+        finally:
+            reload_scheduled = False
+            reload_task = None
+
+    def _schedule_reload() -> None:
+        nonlocal reload_scheduled, reload_task
+        if reload_scheduled:
+            return
+        reload_scheduled = True
+        reload_task = asyncio.create_task(_reload())
+
     def _handler(signum, frame):  # noqa: ARG001
-        if policy_client.reload():
-            print("[glc] policy.yaml reloaded via SIGHUP")
-        else:
-            print("[glc] SIGHUP reload failed: policy worker unavailable")
+        loop.call_soon_threadsafe(_schedule_reload)
 
     try:
         signal.signal(signal.SIGHUP, _handler)
@@ -68,7 +88,7 @@ async def lifespan(app: FastAPI):
     try:
         db.init()
         init_audit()
-        get_or_create_install_token()
+        get_or_create_install_token(production=bool(getattr(app.state, "production", False)))
         ledger = SignedLedgerWriter.from_environment(production=bool(getattr(app.state, "production", False)))
         ledger.init()
         app.state.ledger = ledger
@@ -123,6 +143,19 @@ def create_app(*, production: bool | None = None) -> FastAPI:
                 "/v1/creds/issue",
             }
             if request.url.path in scoped_paths:
+                authorization = request.headers.get("Authorization")
+                if not authorization or not authorization.startswith("Bearer "):
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "missing bearer token (Authorization: Bearer <install_token>)"},
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+                if not authorization.removeprefix("Bearer ").strip():
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "missing bearer token (Authorization: Bearer <install_token>)"},
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
                 return await call_next(request)
             authorization = request.headers.get("Authorization")
             if not authorization or not authorization.startswith("Bearer "):
@@ -140,7 +173,7 @@ def create_app(*, production: bool | None = None) -> FastAPI:
                     headers={"WWW-Authenticate": "Bearer"},
                 )
 
-            expected = get_or_create_install_token()
+            expected = get_or_create_install_token(production=is_production)
             if not hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):
                 return JSONResponse(status_code=403, content={"detail": "install token mismatch"})
 

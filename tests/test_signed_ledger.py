@@ -105,6 +105,22 @@ def test_tampering_is_blocked_and_invalid_signature_fails_closed(ledger):
     assert ledger.integrity_ok() is False
 
 
+def test_non_boolean_reasoning_value_fails_before_canonicalization(ledger):
+    ledger.log_call(provider="gemini", model="x", reasoning_applied=True)
+    with db.conn() as c:
+        c.execute("DROP TRIGGER calls_no_update")
+        c.execute("UPDATE calls SET reasoning_applied=2 WHERE provider='gemini'")
+        c.execute(
+            """CREATE TRIGGER calls_no_update BEFORE UPDATE ON calls BEGIN
+                   SELECT RAISE(ABORT, 'calls ledger is append-only');
+               END"""
+        )
+
+    with pytest.raises(LedgerIntegrityError, match="invalid reasoning_applied"):
+        ledger.recent()
+    assert ledger.integrity_ok() is False
+
+
 def test_unsigned_legacy_rows_are_quarantined(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "legacy.sqlite"))
     with db.conn() as c:

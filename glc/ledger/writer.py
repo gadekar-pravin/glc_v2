@@ -207,7 +207,10 @@ class SignedLedgerWriter:
         for row in rows:
             signature = row.pop("signature", None)
             public_id = row.pop("id", None)
-            row["reasoning_applied"] = bool(row["reasoning_applied"])
+            reasoning_applied = row["reasoning_applied"]
+            if not isinstance(reasoning_applied, int) or reasoning_applied not in (0, 1):
+                raise LedgerIntegrityError("invalid reasoning_applied value in signed ledger row")
+            row["reasoning_applied"] = bool(reasoning_applied)
             try:
                 entry = LedgerEntry.model_validate(row)
             except ValidationError as exc:

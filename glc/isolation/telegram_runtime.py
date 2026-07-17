@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from datetime import UTC, datetime
@@ -17,6 +18,9 @@ from glc.channels.catalogue.telegram.adapter import Adapter
 from glc.channels.envelope import ChannelReply
 from glc.creds.client import get_token
 from glc.isolation.manifest import PROVIDER_SECRET_KEYS, get_slot
+
+logger = logging.getLogger(__name__)
+GATEWAY_ROUNDTRIP_TIMEOUT_SECONDS = 300
 
 
 def _gateway_url() -> str:
@@ -61,26 +65,41 @@ async def run() -> None:
     offset = 0
     async with httpx.AsyncClient(timeout=15.0) as client:
         while True:
-            response = await client.get(
-                f"https://api.telegram.org/bot{bot_token}/getUpdates",
-                params={"offset": offset, "timeout": 10},
-            )
-            if response.status_code == 200:
-                payload = response.json()
-                for update in payload.get("result", ()) if payload.get("ok") else ():
-                    offset = int(update["update_id"]) + 1
-                    message = await adapter.on_message(update)
-                    if message is not None:
-                        await _gateway_roundtrip(adapter, message.model_dump_json())
+            offset = await _poll_once(client, adapter, bot_token, offset)
             await asyncio.sleep(1)
+
+
+async def _poll_once(
+    client: httpx.AsyncClient,
+    adapter: Adapter,
+    bot_token: str,
+    offset: int,
+) -> int:
+    try:
+        response = await client.get(
+            f"https://api.telegram.org/bot{bot_token}/getUpdates",
+            params={"offset": offset, "timeout": 10},
+        )
+    except httpx.RequestError as exc:
+        logger.warning("Telegram polling failed with %s; retrying", type(exc).__name__)
+        return offset
+    if response.status_code == 200:
+        payload = response.json()
+        for update in payload.get("result", ()) if payload.get("ok") else ():
+            offset = int(update["update_id"]) + 1
+            message = await adapter.on_message(update)
+            if message is not None:
+                await _gateway_roundtrip(adapter, message.model_dump_json())
+    return offset
 
 
 async def _gateway_roundtrip(adapter: Adapter, message: str) -> None:
     """Use a bounded WebSocket input; the gateway Function has a five-minute input timeout."""
     headers = {"Authorization": f"Bearer {_identity()}"}
     async with _gateway_websocket(headers) as websocket:
-        await websocket.send(message)
-        payload = json.loads(await websocket.recv())
+        async with asyncio.timeout(GATEWAY_ROUNDTRIP_TIMEOUT_SECONDS):
+            await websocket.send(message)
+            payload = json.loads(await websocket.recv())
     if "error" not in payload:
         await adapter.send(ChannelReply.model_validate(payload))
 
@@ -118,7 +137,7 @@ async def security_probe() -> dict[str, Any]:
         await websocket.send(
             json.dumps(
                 {
-                    "channel": "discord",
+                    "channel": "telegram",
                     "channel_user_id": "leak-3-attacker",
                     "user_handle": "attacker",
                     "text": "pairing boundary probe",
@@ -179,7 +198,7 @@ async def security_probe() -> dict[str, Any]:
         "gateway_status": gateway_network["status"],
         "telegram_api_reachable": telegram_network["reachable"],
         "telegram_api_status": telegram_network["status"],
-        "non_allowlisted_domain_blocked": not denied_network["reachable"],
+        "non_allowlisted_domain_unreachable": not denied_network["reachable"],
         "first_status": first.status_code,
         "replay_status": replay.status_code,
         "cross_tool_status": cross_tool.status_code,
