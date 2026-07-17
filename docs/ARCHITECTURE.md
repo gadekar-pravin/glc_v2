@@ -48,8 +48,10 @@ mutate the agent's own constraints.
 ## 4. The control plane has an out-of-band path
 
 `/v1/control/kill`, `/v1/control/pair`, `/v1/control/presence` are
-authenticated by a per-installation token (`~/.glc/install_token`)
-and isolated from the channel traffic. The kill endpoint binds
+authenticated by a per-installation token. Production receives it as the
+gateway-only `GLC_INSTALL_TOKEN` container Secret; adapter containers receive
+neither that environment variable nor the gateway Volume. Local development
+retains `~/.glc/install_token` for CLI compatibility. The kill endpoint binds
 127.0.0.1 by default; bypassing this requires `GLC_KILL_ALLOW_REMOTE=1`
 and a deliberate operator decision. The intent is to make "STOP"
 reachable through a phone-friendly URL the user can hit when the

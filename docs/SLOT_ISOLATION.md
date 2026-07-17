@@ -32,10 +32,30 @@ uv run modal deploy modal_app.py
 uv run modal deploy modal_telegram.py
 ```
 
-The gateway attaches `glc-llm-keys`, `glc-creds-signing-key`, and the identities of deployed slots.
-The Telegram deployment attaches only `telegram-channel-secret`, `telegram-slot-identity`, and
-`telegram-gateway-url`. Add a slot by creating the manifest-named channel/provider secret and a
-`<slot>-slot-identity` Secret containing the manifest's `GLC_SLOT_IDENTITY_<SLOT>` key.
+The gateway attaches `glc-install-token`, `glc-llm-keys`, `glc-creds-signing-key`, and the identities
+of deployed slots. The Telegram deployment attaches only `telegram-channel-secret`,
+`telegram-slot-identity`, and `telegram-gateway-url`. Add a slot by creating the manifest-named
+channel/provider secret and a `<slot>-slot-identity` Secret containing the manifest's
+`GLC_SLOT_IDENTITY_<SLOT>` key.
+
+The control token has a separate gateway-only Secret. Generate at least 32 random bytes, retain the
+operator copy in a password manager, and never place the value in shell history or logs. On macOS,
+the following shape stores the operator copy in Keychain before creating the Modal Secret:
+
+```sh
+INSTALL_TOKEN="$(uv run python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+security add-generic-password -U -a <operator-account> \
+  -s glc-v1-gateway-install-token -w "$INSTALL_TOKEN"
+uv run modal secret create glc-install-token \
+  GLC_INSTALL_TOKEN="$INSTALL_TOKEN" --force
+unset INSTALL_TOKEN
+```
+
+Only `fastapi_app` attaches `glc-install-token`. Production fails closed if the Secret is absent or
+empty and never falls back to the legacy Volume file. After a successful migration and authenticated
+health check, remove that stale file with
+`uv run modal volume rm glc-data glc/install_token`. Local development continues to use
+`uv run glc token` and its user-only file.
 
 ## Credential flow
 
@@ -55,7 +75,8 @@ never returns secret values:
 uv run modal run modal_telegram.py
 ```
 
-Expected evidence: all six provider-key presence values are `false`, `pairing_api_absent=true`, and
+Expected evidence: all six provider-key presence values are `false`,
+`install_token_env_absent=true`, `install_token_file_readable=false`, `pairing_api_absent=true`, and
 `forged_owner_rejected=true`. The first chat request reaches the provider boundary (normally 502/503
 with mock keys), replay returns 401, cross-tool use returns 403, and the intended use after that
 denial still reaches the provider boundary.

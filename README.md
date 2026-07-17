@@ -26,13 +26,18 @@ proof command are documented in [`docs/SLOT_ISOLATION.md`](docs/SLOT_ISOLATION.m
 not receive `glc-llm-keys` or the installation token.
 
 The Modal wrapper runs with `GLC_ENV=production`. Production disables `/openapi.json`, `/docs`, and
-`/redoc`, and every HTTP request requires the persisted installation token:
+`/redoc`, and every HTTP request requires the gateway-only installation token. Create a random token,
+keep the operator copy in a password manager, and bind it only to the gateway's Modal Secret:
 
 ```sh
-uv run modal volume get glc-data glc/install_token -
-curl -H "Authorization: Bearer <install_token>" \
+uv run modal secret create glc-install-token GLC_INSTALL_TOKEN=<random-install-token>
+curl -H "Authorization: Bearer <random-install-token>" \
   https://<workspace>--glc-v1-gateway-fastapi-app.modal.run/healthz
 ```
+
+Production refuses to start without a non-empty `GLC_INSTALL_TOKEN`; it never reads
+`GLC_CONFIG_DIR/install_token`. Local development remains file-backed, so `uv run glc token` keeps
+working unchanged. Never attach `glc-install-token` to an adapter or voice-slot function.
 
 Gateway channel webhook URLs are disabled in every mode. Provider callbacks terminate in isolated
 slot runtimes, which authenticate to the gateway WebSocket with their slot identity.

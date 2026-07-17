@@ -80,6 +80,11 @@ async def run() -> None:
 async def security_probe() -> dict[str, Any]:
     """Return booleans/statuses only. Secret values never enter the result."""
     provider_keys_absent = {name: name not in os.environ for name in sorted(PROVIDER_SECRET_KEYS)}
+    install_token_env_absent = "GLC_INSTALL_TOKEN" not in os.environ
+    install_token_path = os.path.join(os.getenv("GLC_CONFIG_DIR", "."), "install_token")
+    install_token_file_readable = os.path.isfile(install_token_path) and os.access(
+        install_token_path, os.R_OK
+    )
     try:
         pairing = import_module("glc.security.pairing")
         pairing_api_absent = not hasattr(pairing.get_pairing_store(), "force_pair_owner")
@@ -133,6 +138,8 @@ async def security_probe() -> dict[str, Any]:
         )
     return {
         "provider_keys_absent": provider_keys_absent,
+        "install_token_env_absent": install_token_env_absent,
+        "install_token_file_readable": install_token_file_readable,
         "pairing_api_absent": pairing_api_absent,
         "forged_owner_rejected": forged_owner_rejected,
         "first_status": first.status_code,

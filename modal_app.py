@@ -3,8 +3,8 @@ Modal deployment wrapper for the isolated GLC gateway.
 
 This file changes NO application code. It only describes, for Modal:
   1. the container image to build,
-  2. a persistent Volume for the ~/.glc config/db folder,
-  3. gateway-only provider and credential-signing Secrets,
+  2. a persistent Volume for gateway config and databases,
+  3. gateway-only install-token, provider, and credential-signing Secrets,
   4. per-slot identities used to authenticate isolated adapters,
   5. which object to serve  ->  glc.main:app.
 
@@ -38,9 +38,8 @@ def _gateway_ignore(path: Path) -> bool:
 
 
 # The image = a Linux box with Python 3.11, the same dependencies as
-# pyproject.toml, the glc package copied in, and GLC_CONFIG_DIR pointed at the
-# Volume mount so all databases land on persistent storage instead of the
-# throwaway container filesystem.
+# pyproject.toml, the glc package copied in, and database paths pointed at the
+# Volume mount so state survives the throwaway container filesystem.
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
@@ -57,9 +56,10 @@ image = (
     )
     .env(
         {
-            # Config dir (install token, user policy/channels overrides) on the Volume.
+            # User policy/channels overrides live on the Volume. The control token
+            # comes from the gateway-only glc-install-token Secret, never this path.
             "GLC_CONFIG_DIR": "/data/glc",
-            # Disable API documentation and require the persisted install token on
+            # Disable API documentation and require the injected install token on
             # every HTTP route exposed by the public Modal deployment.
             "GLC_ENV": "production",
             # The three SQLite stores resolve their OWN env vars (default ~/.glc, the
@@ -73,8 +73,8 @@ image = (
     .add_local_dir(str(LOCAL_GLC), remote_path="/root/glc", ignore=_gateway_ignore)
 )
 
-# A persistent Volume. The audit db, pairing db, and install token live here and
-# survive restarts and redeploys. Without this, every restart wipes them.
+# A persistent Volume. Gateway databases and operator configuration live here
+# and survive restarts and redeploys. Secrets are injected separately.
 data_volume = modal.Volume.from_name("glc-data", create_if_missing=True)
 
 # The provider keys, injected as environment variables at runtime. Created
@@ -82,12 +82,13 @@ data_volume = modal.Volume.from_name("glc-data", create_if_missing=True)
 llm_secret = modal.Secret.from_name("glc-llm-keys")
 signing_secret = modal.Secret.from_name("glc-creds-signing-key")
 telegram_identity_secret = modal.Secret.from_name("telegram-slot-identity")
+install_token_secret = modal.Secret.from_name("glc-install-token")
 
 
 @app.function(
     image=image,
     volumes={"/data": data_volume},
-    secrets=[llm_secret, signing_secret, telegram_identity_secret],
+    secrets=[llm_secret, signing_secret, telegram_identity_secret, install_token_secret],
     min_containers=0,  # scale to zero when idle -> protects the free tier
     max_containers=1,  # SQLite single-use ledger requires one writer container
 )
@@ -96,8 +97,8 @@ def fastapi_app():
     """Serve the gateway without channel or external voice slot code."""
     import os
 
-    # The gateway writes its databases and install token here on startup, so the
-    # folder must exist on the mounted Volume before the app's lifespan runs.
+    # The gateway writes databases and operator configuration here, so the folder
+    # must exist on the mounted Volume before the app's lifespan runs.
     os.makedirs("/data/glc", exist_ok=True)
 
     from glc.main import app as web  # the real glc_v1 app, imported as-is

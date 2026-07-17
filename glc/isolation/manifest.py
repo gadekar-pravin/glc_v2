@@ -31,6 +31,8 @@ PROVIDER_SECRET_KEYS = frozenset(
     }
 )
 
+GATEWAY_ONLY_SECRET_KEYS = frozenset({"GLC_INSTALL_TOKEN"})
+
 _PATH = Path(__file__).with_name("slots.yaml")
 
 
@@ -68,6 +70,9 @@ def _parse(raw: dict) -> Slot:
     if unsupported:
         raise RuntimeError(f"slot {name!r} has unsupported tools {sorted(unsupported)}")
     secret_keys = tuple(raw.get("secret_keys", ()))
+    gateway_only = GATEWAY_ONLY_SECRET_KEYS.intersection(secret_keys)
+    if gateway_only:
+        raise RuntimeError(f"slot {name!r} must not receive gateway-only secrets {sorted(gateway_only)}")
     if kind == "channel" and PROVIDER_SECRET_KEYS.intersection(secret_keys):
         raise RuntimeError(f"channel slot {name!r} must not receive LLM provider keys")
     resources = raw.get("resources", {})

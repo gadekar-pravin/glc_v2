@@ -113,6 +113,49 @@ gateway health check returned `{"ok":true,"port":8111}`. The persisted live pair
 existing owner record, so owner success was verified by the control-plane-backed regression without
 creating a synthetic production owner.
 
+## Leak 4 — In-process adapter code could read the install token
+
+**Invariant broken.** The control plane must remain out-of-band. An adapter must never receive the
+credential that authorizes control-plane actions.
+
+**Attacker role.** An attacker controlling a channel adapter or one of its in-process dependencies.
+
+**Finding.** The production gateway generated its active install token at
+`GLC_CONFIG_DIR/install_token`. Because `GLC_CONFIG_DIR=/data/glc`, any code in the monolithic
+gateway process could open the file and reuse the value against the control plane:
+
+```python
+import os
+
+p = os.path.join(os.getenv("GLC_CONFIG_DIR", "."), "install_token")
+print(open(p).read()[:6] + "...")
+```
+
+The safe pre-fix reproduction used an isolated temporary directory, printed no token characters, and
+reported `file_created=true`, `arbitrary_in_process_read_matches=true`, and `token_length=43`.
+
+**Fix.** Production now requires `GLC_INSTALL_TOKEN`, injected from the gateway-only Modal Secret
+`glc-install-token`. The environment value takes precedence without reading or creating a token file;
+an absent or empty production Secret fails startup even when a legacy file exists. Local development
+retains its file-backed `uv run glc token` workflow. The Secret is attached only to `fastapi_app`.
+Adapter functions have neither the Secret nor the gateway Volume, their images exclude `glc.config`,
+and the slot-manifest loader rejects `GLC_INSTALL_TOKEN` in every slot declaration.
+
+**Post-fix evidence.** Regression tests prove production never falls back to the legacy file, local
+token compatibility remains intact, and the Modal function specifications bind the Secret only to
+the gateway. The isolated adapter-process test reports the install-token environment variable absent
+and the candidate token file unreadable without exposing a secret value.
+
+The live token was rotated into `glc-install-token`, with the operator copy retained in macOS
+Keychain. After deployment, authenticated `/healthz` returned HTTP 200 and an invalid token returned
+HTTP 403. The legacy `glc/install_token` was then removed from `glc-data`; a gateway-container probe
+reported `active_token_env_present=true`, `legacy_file_exists=false`,
+`legacy_file_readable=false`, and `original_file_read_failed=true`. Authenticated `/healthz` remained
+HTTP 200 after cleanup. The deployed Telegram probe reported `install_token_env_absent=true` and
+`install_token_file_readable=false`; all six provider variables were absent, the forged-owner attempt
+was rejected, scoped use reached the mock-provider boundary with 502, replay returned 401,
+cross-tool use returned 403, and intended use after denial again reached the boundary with 502.
+
 ## Full route map exposed by public OpenAPI document
 
 **Invariant broken.** Every externally reachable gateway surface must authenticate the caller before

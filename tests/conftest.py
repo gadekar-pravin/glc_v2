@@ -14,6 +14,8 @@ import pytest
 def _isolated_glc_state(monkeypatch, tmp_path):
     cfg = tmp_path / "cfg"
     cfg.mkdir()
+    monkeypatch.delenv("GLC_INSTALL_TOKEN", raising=False)
+    monkeypatch.delenv("GLC_ENV", raising=False)
     monkeypatch.setenv("GLC_CONFIG_DIR", str(cfg))
     monkeypatch.setenv("GLC_AUDIT_DB", str(tmp_path / "audit.sqlite"))
     monkeypatch.setenv("GLC_PAIRING_DB", str(tmp_path / "pairings.sqlite"))
