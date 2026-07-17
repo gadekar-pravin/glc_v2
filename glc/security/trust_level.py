@@ -5,8 +5,8 @@ classify(channel, channel_user_id) -> TrustLevel
   - user_paired  if the pair is registered (any non-owner trust level)
   - untrusted    otherwise
 
-Adapters call this when constructing a ChannelMessage. The test suite
-verifies each channel's three trust paths (owner / paired / unknown).
+Only the gateway calls this when converting untrusted ``ChannelIngress`` into
+an authoritative ``ChannelMessage``. Adapter images exclude this module.
 """
 
 from __future__ import annotations

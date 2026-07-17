@@ -21,10 +21,7 @@ from glc.channels.catalogue.whatsapp.schemas import (
     TwilioParsed,
     TwilioSendPayload,
 )
-from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.security.allowlists import allowed
-from glc.security.pairing import get_pairing_store
-from glc.security.trust_level import TrustLevel, classify
+from glc.channels.envelope import ChannelIngress, ChannelReply
 
 USE_PROVIDER_CACHE: bool = True
 provider_cache: dict[str, str] = {}
@@ -171,20 +168,24 @@ def _to_channel_message(
     parsed: MetaParsed | TwilioParsed,
     *,
     provider: str,
-    trust: TrustLevel,
-) -> ChannelMessage:
+    is_public_channel: bool,
+) -> ChannelIngress:
     if isinstance(parsed, MetaParsed):
         arrived_at = datetime.fromtimestamp(int(float(parsed.timestamp)), tz=UTC)
     else:
         arrived_at = parsed.timestamp
-    return ChannelMessage(
+    return ChannelIngress(
         channel="whatsapp",
         channel_user_id=parsed.from_id,
         user_handle=parsed.profile_name or parsed.from_id,
         text=parsed.text,
-        trust_level=trust,
         arrived_at=arrived_at,
-        metadata={"provider": provider, "message_id": parsed.message_id},
+        metadata={
+            "provider": provider,
+            "message_id": parsed.message_id,
+            "is_public_channel": is_public_channel,
+            "was_mentioned": False,
+        },
     )
 
 
@@ -255,7 +256,7 @@ async def _send_twilio(payload: TwilioSendPayload) -> dict[str, Any]:
 class Adapter(ChannelAdapter):
     name = "whatsapp"
 
-    async def on_message(self, raw: Any) -> ChannelMessage | None:  # type: ignore[override]
+    async def on_message(self, raw: Any) -> ChannelIngress | None:  # type: ignore[override]
         mock = self.config.get("mock")
         if mock is not None:
             mock.pop_disconnect()
@@ -302,42 +303,15 @@ class Adapter(ChannelAdapter):
         if parsed is None:
             return None
 
-        owner_ids = [r.channel_user_id for r in get_pairing_store().owners("whatsapp")]
-        trust = classify("whatsapp", parsed.from_id)
-        ok, _why = allowed(
-            "whatsapp",
-            parsed.from_id,
-            owner_ids=owner_ids,
-            is_public_channel=is_public,
-            was_mentioned=False,
-        )
-        if not ok and is_public:
-            # Only public-channel messages are silently dropped here. A
-            # private (non-public) message always gets an envelope
-            # constructed with its real trust_level, even when allowed()
-            # says no (e.g. channels.yaml has whatsapp disabled, or the
-            # sender isn't in allowed_senders) -- the gateway's own
-            # independent allowed() re-check (glc/routes/channels.py) is
-            # the actual enforcement point for that case, the same
-            # defense-in-depth split every other channel adapter uses.
-            # This also closes the mention-gate for public channels
-            # regardless of trust level (owner_paired/user_paired
-            # included), unlike a trust-based bypass.
-            return None
-
         if USE_PROVIDER_CACHE:
             _remember_provider(parsed.from_id, provider)
 
-        return _to_channel_message(parsed, provider=provider, trust=trust)
+        return _to_channel_message(parsed, provider=provider, is_public_channel=is_public)
 
     async def send(self, reply: ChannelReply) -> Any:
         provider: str | None = None
         if USE_PROVIDER_CACHE and reply.channel_user_id in provider_cache:
             provider = provider_cache[reply.channel_user_id]
-
-        rec = get_pairing_store().lookup("whatsapp", reply.channel_user_id)
-        if rec is None:
-            return {"error": "recipient not paired", "code": "outbound_blocked"}
 
         mock = self.config.get("mock")
 

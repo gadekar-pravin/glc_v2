@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
 import sys
 
 import httpx
@@ -20,8 +19,6 @@ from dotenv import load_dotenv
 
 from glc.channels.catalogue.telegram.adapter import Adapter
 from glc.channels.envelope import ChannelReply
-from glc.config import get_or_create_install_token
-from glc.security.pairing import get_pairing_store
 
 load_dotenv()
 
@@ -35,41 +32,35 @@ async def main() -> None:
 
     print("Telegram Live Polling Bridge Starting...")
 
-    # 1. Ask for owner chat ID or read it from env to pair automatically
-    owner_id = os.getenv("TELEGRAM_OWNER_ID")
-    store = get_pairing_store()
+    # Pair owners separately through /v1/control/pair and /pair/confirm.
+    print("Owner trust is assigned by the gateway; this adapter never opens the pairing database.")
 
-    if owner_id:
-        store.force_pair_owner("telegram", owner_id, user_handle="owner")
-        print(f"Paired owner Telegram ID (from env): {owner_id}")
-    else:
-        print("\n[live_poll] No TELEGRAM_OWNER_ID set. Will auto-pair the first user who messages the bot!")
-
-    # 2. Get Gateway connection details
+    # Get gateway connection details and the slot-scoped identity.
     gateway_port = int(os.getenv("GLC_PORT", "8111"))
-    install_token = get_or_create_install_token()
+    identity = os.getenv("GLC_SLOT_IDENTITY_TELEGRAM", "").strip()
+    if not identity:
+        print("Error: GLC_SLOT_IDENTITY_TELEGRAM is not set.")
+        sys.exit(1)
 
     # Instantiate the adapter
     adapter = Adapter()
 
     # WebSocket URL
-    ws_url = f"ws://localhost:{gateway_port}/v1/channels/telegram?token={install_token}"
+    ws_url = f"ws://localhost:{gateway_port}/v1/channels/telegram"
 
     print(f"Connecting to GLC Gateway WebSocket at: ws://localhost:{gateway_port}/v1/channels/telegram")
 
-    try:
-        import websockets
-    except ImportError:
-        print("Installing websockets library...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets"])
-        import websockets
+    import websockets
 
-    async with websockets.connect(ws_url) as ws:
+    async with websockets.connect(
+        ws_url,
+        additional_headers={"Authorization": f"Bearer {identity}"},
+    ) as ws:
         print("Connected to GLC Gateway WebSocket!")
         offset = 0
 
         async def poll_telegram() -> None:
-            nonlocal offset, owner_id
+            nonlocal offset
             async with httpx.AsyncClient() as client:
                 while True:
                     try:
@@ -80,16 +71,6 @@ async def main() -> None:
                             if data.get("ok"):
                                 for update in data["result"]:
                                     offset = update["update_id"] + 1
-                                    message = update.get("message") or {}
-                                    from_user = message.get("from") or {}
-                                    user_id = from_user.get("id") or message.get("chat", {}).get("id")
-
-                                    # Auto-pair the first sender as owner
-                                    if user_id and not owner_id:
-                                        owner_id = str(user_id)
-                                        store.force_pair_owner("telegram", owner_id, user_handle="owner")
-                                        print(f"\n*** Auto-paired user {owner_id} as the owner! ***\n")
-
                                     print(f"Received Telegram Update ID: {update['update_id']}")
 
                                     # Translate to ChannelMessage

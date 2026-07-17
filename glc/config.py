@@ -14,6 +14,7 @@ import yaml
 DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
 CONFIG_DIR = Path(os.getenv("GLC_CONFIG_DIR", str(DEFAULT_DIR)))
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+INSTALL_TOKEN_ENV = "GLC_INSTALL_TOKEN"
 
 # Packaged defaults shipped with glc (under the policy/ subpackage).
 PACKAGED_POLICY = Path(__file__).parent / "policy" / "policy.yaml"
@@ -41,9 +42,26 @@ def install_token_path() -> Path:
     return CONFIG_DIR / "install_token"
 
 
-def get_or_create_install_token() -> str:
-    """Per-installation token used to authenticate WS adapter connections
-    and /v1/control/* requests. Generated once and persisted to disk."""
+def get_or_create_install_token(*, production: bool | None = None) -> str:
+    """Return the gateway control token.
+
+    Production receives the token from its gateway-only container Secret and
+    must never fall back to shared storage. Local development retains the
+    original persisted-token workflow for CLI compatibility.
+    """
+    configured = os.getenv(INSTALL_TOKEN_ENV)
+    if configured is not None:
+        token = configured.strip()
+        if not token:
+            raise RuntimeError(f"{INSTALL_TOKEN_ENV} is configured but empty")
+        return token
+
+    is_production = (
+        os.getenv("GLC_ENV", "").strip().lower() == "production" if production is None else production
+    )
+    if is_production:
+        raise RuntimeError(f"{INSTALL_TOKEN_ENV} is required in production")
+
     p = install_token_path()
     if p.exists():
         return p.read_text().strip()

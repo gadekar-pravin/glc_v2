@@ -14,7 +14,7 @@ Run:
 
 Env:
     TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_PHONE_NUMBER   (adapter + signing)
-    TWILIO_OWNER_NUMBER      your mobile, paired as owner (owner_paired)
+    GLC_SLOT_IDENTITY_TWILIO_SMS  Twilio SMS slot identity configured on gateway
     GLC_PUBLIC_BASE          the ngrok https URL (serves /artifacts for outbound MMS)
     GLC_TWILIO_WEBHOOK_PORT  receiver port (default 8200)
     GLC_GATEWAY_HOST/PORT    gateway location (default localhost:8111)
@@ -30,8 +30,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from glc.channels.envelope import ChannelMessage
-from glc.security.pairing import get_pairing_store
+from glc.channels.envelope import ChannelIngress
 
 from .adapter import Adapter
 from .webhook import build_app, gateway_roundtrip
@@ -61,10 +60,6 @@ def _field(label: str, value: str, color: str = "") -> None:
     print(f"     {DIM}{label:14s}{RESET} {color or WHITE}{value}{RESET}")
 
 
-def _trust_color(trust: str) -> str:
-    return GREEN if trust == "owner_paired" else YELLOW if trust == "user_paired" else RED
-
-
 def _config() -> dict[str, Any]:
     return {
         "account_sid": os.environ.get("TWILIO_ACCOUNT_SID", ""),
@@ -82,13 +77,12 @@ def _make_handle_message(adapter: Adapter, cfg: dict[str, Any]):
     """Build the async callback the receiver runs for each inbound envelope:
     print it, round-trip through the gateway WS, then send the reply."""
 
-    async def handle_message(msg: ChannelMessage) -> None:
+    async def handle_message(msg: ChannelIngress) -> None:
         print(f"\n{_rule()}")
         print(f"  {BOLD}>> INCOMING {msg.channel.upper()}{RESET}  {DIM}{ts()}{RESET}")
         print(_rule())
-        tc = _trust_color(msg.trust_level)
         _field("from", msg.channel_user_id)
-        _field("trust", msg.trust_level, tc)
+        _field("trust", "assigned by gateway", DIM)
         _field("text", (msg.text or "(empty)"))
         if msg.attachments:
             for a in msg.attachments:
@@ -134,13 +128,12 @@ def main() -> None:
     print(f"  {BOLD}{WHITE}GLC v1 — Twilio SMS/MMS Adapter{RESET}  {DIM}Live WebSocket demo{RESET}")
     print(_rule())
 
-    # ── Pair the owner so inbound is classified owner_paired ──
+    # Owner pairing is performed out-of-process through the gateway control API.
     if cfg["owner_number"]:
-        get_pairing_store().force_pair_owner("twilio_sms", cfg["owner_number"], user_handle="owner")
         _field("owner", cfg["owner_number"], GREEN)
-        _field("trust", "owner_paired", GREEN)
+        _field("pairing", "use /v1/control/pair + /pair/confirm", YELLOW)
     else:
-        _field("owner", "TWILIO_OWNER_NUMBER unset — senders will be untrusted", YELLOW)
+        _field("owner", "TWILIO_OWNER_NUMBER unset", YELLOW)
 
     _field("bot number", cfg["phone_number"] or "(TWILIO_PHONE_NUMBER unset)")
     _field("gateway", f"ws://{cfg['gw_host']}:{cfg['gw_port']}/v1/channels/twilio_sms", CYAN)

@@ -12,12 +12,13 @@ trust the payload, so the envelope must not be constructed at all.
 
 from __future__ import annotations
 
+import io
 from datetime import datetime
 
 import pytest
 
 from glc.channels.catalogue.whatsapp.adapter import Adapter
-from glc.channels.envelope import ChannelMessage, ChannelReply
+from glc.channels.envelope import ChannelIngress, ChannelReply
 from glc.security.pairing import get_pairing_store
 from tests.channels.mocks.whatsapp_mock import (
     DEFAULT_APP_SECRET,
@@ -25,6 +26,7 @@ from tests.channels.mocks.whatsapp_mock import (
     STRANGER_ID,
     WhatsappMock,
 )
+from tests.pairing_helpers import pair_owner as seed_owner
 
 
 @pytest.fixture
@@ -35,7 +37,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("whatsapp", OWNER_ID, user_handle="owner")
+    seed_owner(store, "whatsapp", OWNER_ID, user_handle="owner")
     yield
     store.revoke("whatsapp", OWNER_ID)
 
@@ -50,10 +52,10 @@ async def test_on_message_owner_returns_valid_envelope(mock, pair_owner):
     adapter = Adapter(config={"mock": mock})
     ev = mock.queue_owner_message("hello from owner")
     msg = await adapter.on_message(ev)
-    assert isinstance(msg, ChannelMessage)
+    assert isinstance(msg, ChannelIngress)
     assert msg.channel == "whatsapp"
     assert msg.channel_user_id == OWNER_ID
-    assert msg.trust_level == "owner_paired"
+    assert msg.trust_level is None
     assert msg.text == "hello from owner"
     assert isinstance(msg.arrived_at, datetime)
 
@@ -65,7 +67,7 @@ async def test_on_message_stranger_is_untrusted(mock):
     msg = await adapter.on_message(ev)
     assert msg is not None
     assert msg.channel_user_id == STRANGER_ID
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
 
 
 @pytest.mark.asyncio
@@ -110,7 +112,7 @@ async def test_allowlist_silently_drops_stranger_in_public(mock):
     adapter = Adapter(config={"mock": mock, "is_public_channel": True})
     ev = mock.queue_stranger_message("hi from public")
     msg = await adapter.on_message(ev)
-    assert msg is None or msg.trust_level == "untrusted"
+    assert msg is None or msg.trust_level is None
 
 
 @pytest.mark.asyncio
@@ -141,5 +143,27 @@ async def test_channel_specific_behaviour_signature_verification(mock, pair_owne
     # 3. Valid
     raw, headers = mock.queue_signed_webhook(text="valid probe")
     out = await adapter.on_message({"raw_body": raw, "headers": headers})
-    assert isinstance(out, ChannelMessage)
+    assert isinstance(out, ChannelIngress)
     assert out.text == "valid probe"
+
+
+def test_demo_webhook_returns_retryable_gateway_status(monkeypatch):
+    import glc.channels.catalogue.whatsapp.demo_webhook_server as demo
+
+    async def rate_limited(self, raw_body, headers):  # noqa: ARG001
+        return 429
+
+    monkeypatch.setattr(demo.Handler, "_handle_inbound", rate_limited)
+    handler = object.__new__(demo.Handler)
+    handler.headers = {"Content-Length": "2"}
+    handler.rfile = io.BytesIO(b"{}")
+    handler.wfile = io.BytesIO()
+    response_codes = []
+    handler.send_response = response_codes.append
+    handler.send_header = lambda *args: None
+    handler.end_headers = lambda: None
+
+    handler.do_POST()
+
+    assert response_codes == [429]
+    assert handler.wfile.getvalue() == b'{"status":"retry"}'

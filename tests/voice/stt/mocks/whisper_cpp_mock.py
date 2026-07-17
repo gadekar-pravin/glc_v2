@@ -28,6 +28,7 @@ class WhisperCppMock:
     model_path: str = "/fake/ggml-base.bin"
     last_argv: list[str] = field(default_factory=list)
     subprocess_call_count: int = 0
+    setup_frame: dict[str, Any] | None = None
 
     async def transcribe(self, audio: bytes, mime: str) -> TranscribeResult:
         self.received_calls.append({"audio_len": len(audio), "mime": mime})

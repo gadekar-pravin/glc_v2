@@ -1,6 +1,6 @@
 """Twilio SMS channel adapter.
 
-Inbound:  Twilio webhook POST (application/x-www-form-urlencoded) -> ChannelMessage
+Inbound:  Twilio webhook POST (application/x-www-form-urlencoded) -> ChannelIngress
 Outbound: ChannelReply -> POST /2010-04-01/Accounts/{AccountSid}/Messages.json
 
 Environment variables (live usage):
@@ -22,10 +22,7 @@ from typing import Any, Literal
 import httpx
 
 from glc.channels.base import ChannelAdapter
-from glc.channels.envelope import Attachment, ChannelMessage, ChannelReply
-from glc.security.allowlists import allowed
-from glc.security.pairing import get_pairing_store
-from glc.security.trust_level import classify
+from glc.channels.envelope import Attachment, ChannelIngress, ChannelReply
 
 from .schemas import TwilioInboundForm
 
@@ -73,18 +70,17 @@ class Adapter(ChannelAdapter):
         )
         self._learned_bot_number: str = ""
 
-    async def on_message(self, raw: Any) -> ChannelMessage:
+    async def on_message(self, raw: Any) -> ChannelIngress:
         mock = self.config.get("mock")
 
         # Handle forced disconnect: return a valid envelope, never raise.
         if mock is not None and mock.pop_disconnect():
             disc_phone: str = raw.get("From", "unknown")
-            return ChannelMessage(
+            return ChannelIngress(
                 channel=self.name,
                 channel_user_id=disc_phone,
                 user_handle=disc_phone,
                 text=None,
-                trust_level=classify(self.name, disc_phone),
                 arrived_at=datetime.now(UTC),
                 metadata={"reconnect": True},
             )
@@ -98,31 +94,7 @@ class Adapter(ChannelAdapter):
         if to_phone and not self._bot_number:
             self._learned_bot_number = to_phone
 
-        trust_level = classify(self.name, from_phone)
-
-        # Public-channel allowlist gate.
         is_public = bool(self.config.get("is_public_channel", False))
-        if is_public:
-            owners = [p.channel_user_id for p in get_pairing_store().owners(channel=self.name)]
-            ok, _ = allowed(
-                self.name,
-                from_phone,
-                owner_ids=owners,
-                is_public_channel=True,
-                was_mentioned=bool(raw.get("was_mentioned", False)),
-            )
-            if not ok:
-                # Return untrusted envelope rather than None — satisfies the
-                # test assertion (None or trust_level=="untrusted") while
-                # keeping the return type consistent with the ABC.
-                return ChannelMessage(
-                    channel=self.name,
-                    channel_user_id=from_phone,
-                    user_handle=from_phone,
-                    text=body or None,
-                    trust_level="untrusted",
-                    arrived_at=datetime.now(UTC),
-                )
 
         # MMS: download each media item, SHA-256 hash, persist to artifact store.
         # A failure fetching/persisting one item must not take down the whole
@@ -160,6 +132,8 @@ class Adapter(ChannelAdapter):
         metadata: dict[str, Any] = {
             "message_sid": form.MessageSid,
             "account_sid": form.AccountSid,
+            "is_public_channel": is_public,
+            "was_mentioned": bool(raw.get("was_mentioned", False)),
         }
         if failed_media:
             metadata["failed_media"] = failed_media
@@ -168,13 +142,12 @@ class Adapter(ChannelAdapter):
             # Surface opt-out/help keywords so the gateway/agent can comply.
             metadata["sms_keyword"] = keyword
 
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=from_phone,
             user_handle=from_phone,
             text=body or None,
             attachments=attachments,
-            trust_level=trust_level,
             arrived_at=datetime.now(UTC),
             metadata=metadata,
         )

@@ -1,0 +1,24 @@
+slots:
+  - {name: discord, kind: channel, package: glc.channels.catalogue.discord, runtime: gateway, secret_name: discord-channel-secret, secret_keys: [DISCORD_BOT_TOKEN], allowed_tools: [llm.chat]}
+  - {name: gmail, kind: channel, package: glc.channels.catalogue.gmail, runtime: webhook, secret_name: gmail-channel-secret, secret_keys: [GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET], allowed_tools: [llm.chat]}
+  - {name: imap, kind: channel, package: glc.channels.catalogue.imap, runtime: polling, secret_name: imap-channel-secret, secret_keys: [IMAP_USERNAME, IMAP_PASSWORD, SMTP_USERNAME, SMTP_PASSWORD], allowed_tools: [llm.chat]}
+  - {name: line, kind: channel, package: glc.channels.catalogue.line, runtime: webhook, secret_name: line-channel-secret, secret_keys: [LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET], allowed_tools: [llm.chat]}
+  - {name: local_mic, kind: channel, package: glc.channels.catalogue.local_mic, runtime: local, secret_name: local-mic-channel-secret, secret_keys: [], allowed_tools: [llm.chat, stt.transcribe, tts.synthesize]}
+  - {name: matrix, kind: channel, package: glc.channels.catalogue.matrix, runtime: polling, secret_name: matrix-channel-secret, secret_keys: [MATRIX_ACCESS_TOKEN], allowed_tools: [llm.chat]}
+  - {name: signal, kind: channel, package: glc.channels.catalogue.signal, runtime: polling, secret_name: signal-channel-secret, secret_keys: [SIGNAL_ACCOUNT], allowed_tools: [llm.chat]}
+  - {name: slack, kind: channel, package: glc.channels.catalogue.slack, runtime: webhook, secret_name: slack-channel-secret, secret_keys: [SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET], allowed_tools: [llm.chat]}
+  - {name: teams, kind: channel, package: glc.channels.catalogue.teams, runtime: webhook, secret_name: teams-channel-secret, secret_keys: [TEAMS_APP_ID, TEAMS_APP_PASSWORD, TEAMS_TENANT_ID], allowed_tools: [llm.chat]}
+  - {name: telegram, kind: channel, package: glc.channels.catalogue.telegram, runtime: polling, secret_name: telegram-channel-secret, secret_keys: [TELEGRAM_BOT_TOKEN], allowed_tools: [llm.chat], egress_domains: [api.telegram.org]}
+  - {name: twilio_sms, kind: channel, package: glc.channels.catalogue.twilio_sms, runtime: webhook, secret_name: twilio-sms-channel-secret, secret_keys: [TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER], allowed_tools: [llm.chat]}
+  - {name: twilio_voice, kind: channel, package: glc.channels.catalogue.twilio_voice, runtime: webhook, secret_name: twilio-voice-channel-secret, secret_keys: [TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER], allowed_tools: [llm.chat, stt.transcribe, tts.synthesize]}
+  - {name: webhook, kind: channel, package: glc.channels.catalogue.webhook, runtime: webhook, secret_name: webhook-channel-secret, secret_keys: [WEBHOOK_SHARED_SECRET], allowed_tools: [llm.chat]}
+  - {name: webui, kind: channel, package: glc.channels.catalogue.webui, runtime: web, secret_name: webui-channel-secret, secret_keys: [], allowed_tools: [llm.chat]}
+  - {name: whatsapp, kind: channel, package: glc.channels.catalogue.whatsapp, runtime: webhook, secret_name: whatsapp-channel-secret, secret_keys: [WHATSAPP_APP_SECRET, WHATSAPP_TOKEN, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN], allowed_tools: [llm.chat]}
+
+  - {name: stt_gemini_live, kind: voice, package: glc.voice.stt.providers.gemini_live, runtime: stt, secret_name: stt-gemini-live-secret, secret_keys: [GEMINI_API_KEY], allowed_tools: []}
+  - {name: stt_groq_whisper, kind: voice, package: glc.voice.stt.providers.groq_whisper, runtime: stt, secret_name: stt-groq-whisper-secret, secret_keys: [GROQ_API_KEY], allowed_tools: []}
+  - {name: stt_whisper_cpp, kind: voice, package: glc.voice.stt.providers.whisper_cpp, runtime: stt, secret_name: stt-whisper-cpp-secret, secret_keys: [], allowed_tools: []}
+  - {name: tts_cartesia, kind: voice, package: glc.voice.tts.providers.cartesia, runtime: tts, secret_name: tts-cartesia-secret, secret_keys: [CARTESIA_API_KEY], allowed_tools: []}
+  - {name: tts_elevenlabs, kind: voice, package: glc.voice.tts.providers.elevenlabs, runtime: tts, secret_name: tts-elevenlabs-secret, secret_keys: [ELEVENLABS_API_KEY], allowed_tools: []}
+  - {name: tts_gemini_live, kind: voice, package: glc.voice.tts.providers.gemini_live, runtime: tts, secret_name: tts-gemini-live-secret, secret_keys: [GEMINI_API_KEY], allowed_tools: []}
+  - {name: tts_kokoro, kind: voice, package: glc.voice.tts.providers.kokoro, runtime: tts, secret_name: tts-kokoro-secret, secret_keys: [], allowed_tools: []}

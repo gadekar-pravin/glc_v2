@@ -1,8 +1,8 @@
 """Isolate GLC state for the twilio_sms adapter test suite.
 
 The repo-level tests/conftest.py only covers the tests/ tree, so tests that
-live here (e.g. test_extra.py, which calls force_pair_owner) would otherwise
-write to the real ~/.glc pairing DB. This mirrors that isolation: each test
+live here and exercise the pair/confirm flow would otherwise write to the
+real ~/.glc pairing DB. This mirrors that isolation: each test
 gets fresh config/audit/pairing/gateway DBs under tmp, so nothing touches the
 user's ~/.glc and the pairing store is writable even in a sandbox.
 """
@@ -31,9 +31,6 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.security.rate_limits as _r
 
     _r._limiter = None
-    import glc.policy.engine as _e
-
-    _e._engine = None
     import glc.audit.store as _a
 
     _a._singleton = None

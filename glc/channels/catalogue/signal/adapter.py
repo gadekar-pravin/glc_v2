@@ -26,10 +26,7 @@ from glc.channels.catalogue.signal.schemas import (
     SignalReceiveNotification,
     SignalSendRequest,
 )
-from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.security.allowlists import allowed
-from glc.security.pairing import get_pairing_store
-from glc.security.trust_level import classify
+from glc.channels.envelope import ChannelIngress, ChannelReply
 
 
 class Adapter(ChannelAdapter):
@@ -37,7 +34,7 @@ class Adapter(ChannelAdapter):
 
     name = "signal"
 
-    async def on_message(self, raw: Any) -> ChannelMessage | None:
+    async def on_message(self, raw: Any) -> ChannelIngress | None:
         # Reject non-dict payloads (e.g. bare strings from broken transports).
         if not isinstance(raw, dict):
             return None
@@ -72,35 +69,21 @@ class Adapter(ChannelAdapter):
         if data_message and data_message.group_info:
             group_id = data_message.group_info.group_id
 
-        trust_level = classify(self.name, channel_user_id)
-
-        # In public channels the default posture is owner-/allowlist-only.
-        # Consult the allowlist before surfacing strangers; silently drop
-        # senders who are not permitted.
-        if self.config.get("is_public_channel"):
-            owner_ids = [rec.channel_user_id for rec in get_pairing_store().owners(self.name)]
-            ok, _reason = allowed(
-                self.name,
-                channel_user_id,
-                owner_ids=owner_ids,
-                is_public_channel=True,
-            )
-            if not ok:
-                return None
-
         arrived_at = self._arrived_at(envelope, data_message)
 
-        metadata: dict[str, Any] = {}
+        metadata: dict[str, Any] = {
+            "is_public_channel": bool(self.config.get("is_public_channel", False)),
+            "was_mentioned": False,
+        }
         if group_id:
             metadata["signal_group_id"] = group_id
 
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=channel_user_id,
             user_handle=envelope.source_name or channel_user_id,
             text=text,
             thread_id=group_id,
-            trust_level=trust_level,
             arrived_at=arrived_at,
             metadata=metadata,
         )

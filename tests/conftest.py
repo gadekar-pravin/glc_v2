@@ -14,6 +14,9 @@ import pytest
 def _isolated_glc_state(monkeypatch, tmp_path):
     cfg = tmp_path / "cfg"
     cfg.mkdir()
+    monkeypatch.delenv("GLC_INSTALL_TOKEN", raising=False)
+    monkeypatch.delenv("GLC_ENV", raising=False)
+    monkeypatch.setenv("GLC_LEDGER_SIGNING_KEY", "test-ledger-signing-key-at-least-32-bytes")
     monkeypatch.setenv("GLC_CONFIG_DIR", str(cfg))
     monkeypatch.setenv("GLC_AUDIT_DB", str(tmp_path / "audit.sqlite"))
     monkeypatch.setenv("GLC_PAIRING_DB", str(tmp_path / "pairings.sqlite"))
@@ -29,9 +32,6 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.security.rate_limits as _r
 
     _r._limiter = None
-    import glc.policy.engine as _e
-
-    _e._engine = None
     import glc.audit.store as _a
 
     _a._singleton = None
@@ -55,3 +55,9 @@ def install_token(app_client):
     from glc.config import install_token_path
 
     return install_token_path().read_text().strip()
+
+
+@pytest.fixture
+def install_auth(install_token):
+    """Authorization header for routes protected by the install token."""
+    return {"Authorization": f"Bearer {install_token}"}

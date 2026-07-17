@@ -12,18 +12,19 @@ from __future__ import annotations
 
 import asyncio as _asyncio
 import json
+import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from jsonschema import Draft202012Validator, ValidationError
 
-from glc import db
 from glc import providers as P
+from glc.creds.auth import authorize_tool_request
 from glc.llm_schemas import (
     BatchChatRequest,
     ChatRequest,
@@ -36,6 +37,12 @@ from glc.llm_schemas import (
     VisionRequest,
 )
 from glc.routing import DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS
+from glc.security.image_urls import ImageURLFetchError, fetch_image_as_data_url
+from glc.security.install_token import require_install_token
+
+logger = logging.getLogger(__name__)
+
+PUBLIC_UPSTREAM_ERROR = "upstream provider request failed"
 
 DEFAULT_ORDER = ["ollama", "gemini", "nvidia", "groq", "cerebras", "openrouter", "github"]
 ORDER = [x.strip() for x in os.getenv("LLM_ORDER", ",".join(DEFAULT_ORDER)).split(",") if x.strip()]
@@ -101,7 +108,7 @@ def _parse_tier(text: str) -> str | None:
     return None
 
 
-async def _classify_tier(req, role, router_pool, prompt_text):
+async def _classify_tier(req, role, router_pool, prompt_text, ledger):
     estimated = _estimate_tokens(prompt_text)
     if estimated > 8000:
         return RouterDecision(
@@ -148,20 +155,25 @@ async def _classify_tier(req, role, router_pool, prompt_text):
             if tier == "HUGE" and estimated <= 8000:
                 tier = "LARGE"
             if tier is None:
-                db.log_call(
+                logger.warning(
+                    "Router provider returned an unparseable tier (provider=%s, reply=%r)",
+                    name,
+                    result.get("text", "")[:100],
+                )
+                ledger.log_call(
                     provider=name,
                     model=result.get("model", provider.model),
                     input_tokens=result.get("input_tokens", 0),
                     output_tokens=result.get("output_tokens", 0),
                     latency_ms=latency,
                     status="error",
-                    error=f"unparseable tier reply: {result.get('text', '')[:100]}",
+                    error=PUBLIC_UPSTREAM_ERROR,
                     prompt_chars=len(envelope),
                     call_role=call_role,
                     router_decision="unparseable",
                 )
                 continue
-            db.log_call(
+            ledger.log_call(
                 provider=name,
                 model=result.get("model", provider.model),
                 input_tokens=result.get("input_tokens", 0),
@@ -182,14 +194,15 @@ async def _classify_tier(req, role, router_pool, prompt_text):
                 router_latency_ms=latency,
                 fallback_used=False,
             )
-        except Exception as e:
+        except Exception:
             latency = int((time.time() - t0) * 1000)
             last_latency = latency
-            db.log_call(
+            logger.exception("Router provider request failed (provider=%s)", name)
+            ledger.log_call(
                 provider=name,
                 model=provider.model,
                 status="error",
-                error=str(e)[:500],
+                error=PUBLIC_UPSTREAM_ERROR,
                 latency_ms=latency,
                 call_role=call_role,
                 router_decision="error",
@@ -269,6 +282,25 @@ def _attempts_str(attempts):
     return "; ".join(f"{a['provider']}:{a['reason']}" for a in attempts)
 
 
+def _public_attempts(attempts):
+    return [
+        {**attempt, "reason": PUBLIC_UPSTREAM_ERROR}
+        if isinstance(attempt, dict) and attempt.get("reason")
+        else attempt
+        for attempt in attempts
+    ]
+
+
+def _sanitize_persisted_attempted(value):
+    if not isinstance(value, str) or not value:
+        return value
+    sanitized = []
+    for attempt in value.split("; "):
+        provider, separator, _reason = attempt.partition(":")
+        sanitized.append(f"{provider}:{PUBLIC_UPSTREAM_ERROR}" if separator else PUBLIC_UPSTREAM_ERROR)
+    return "; ".join(sanitized)
+
+
 def _required_caps(req: ChatRequest):
     caps = []
     if req.tools:
@@ -286,25 +318,6 @@ def _required_caps(req: ChatRequest):
 
 
 async def _resolve_image_urls(messages):
-    import base64
-
-    import httpx as _httpx
-
-    async def _fetch_to_data_url(url: str) -> str:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; GLCv1/0.1; +image-resolver)",
-            "Accept": "image/*,*/*;q=0.8",
-        }
-        async with _httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as c:
-            try:
-                r = await c.get(url)
-                r.raise_for_status()
-            except _httpx.HTTPError as e:
-                raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
-            mt = (r.headers.get("content-type") or "image/png").split(";")[0].strip()
-            b64 = base64.b64encode(r.content).decode()
-            return f"data:{mt};base64,{b64}"
-
     out = []
     for m in messages:
         content = m.get("content")
@@ -318,7 +331,10 @@ async def _resolve_image_urls(messages):
                 iu = b.get("image_url")
                 url = iu.get("url") if isinstance(iu, dict) else iu
                 if isinstance(url, str) and url.startswith(("http://", "https://")):
-                    data_url = await _fetch_to_data_url(url)
+                    try:
+                        data_url = await fetch_image_as_data_url(url)
+                    except ImageURLFetchError as e:
+                        raise HTTPException(400, f"failed to fetch image url {url!r}: {e}")
                     new_blocks.append({"type": "image_url", "image_url": {"url": data_url}})
                     changed = True
                     continue
@@ -344,9 +360,9 @@ def _validate_structured(text: str, schema: dict):
 # ─────────────────────────── routes ───────────────────────────
 
 
-@router.post("/v1/chat")
-async def chat(req: ChatRequest, request: Request):
+async def _chat_impl(req: ChatRequest, request: Request, *, accounting_agent: str | None = None):
     state = request.app.state
+    ledger = state.ledger
     rtr = state.router
     router_pool = state.router_pool
     messages = _normalize_messages(req)
@@ -374,7 +390,7 @@ async def chat(req: ChatRequest, request: Request):
     retries = 0
     router_decision: RouterDecision | None = None
     if req.auto_route and not req.provider:
-        router_decision = await _classify_tier(req, req.auto_route, router_pool, prompt_text)
+        router_decision = await _classify_tier(req, req.auto_route, router_pool, prompt_text, ledger)
         if router_decision.tier == "HUGE":
             raise HTTPException(
                 503,
@@ -397,7 +413,6 @@ async def chat(req: ChatRequest, request: Request):
         )
 
     all_attempts: list[dict] = []
-    last_err = None
 
     if explicit_override and len(candidates) == 1:
         deadline = time.time() + 30
@@ -443,7 +458,7 @@ async def chat(req: ChatRequest, request: Request):
                                 yield f"data: {json.dumps({'provider': name, 'delta': chunk})}\n\n"
                         text = "".join(agg)
                         latency = int((time.time() - t0) * 1000)
-                        db.log_call(
+                        ledger.log_call(
                             provider=name,
                             model=req.model or provider.model,
                             latency_ms=latency,
@@ -452,26 +467,27 @@ async def chat(req: ChatRequest, request: Request):
                             response_chars=len(text),
                             override=req.provider,
                             attempted=_attempts_str(all_attempts),
-                            agent=req.agent,
+                            agent=accounting_agent,
                             session=req.session,
                             retries=retries,
                         )
                         yield f"data: {json.dumps({'done': True, 'provider': name})}\n\n"
-                    except Exception as e:
-                        db.log_call(
+                    except Exception:
+                        logger.exception("Streaming upstream request failed (provider=%s)", name)
+                        ledger.log_call(
                             provider=name,
                             model=req.model or provider.model,
                             status="error",
-                            error=str(e)[:500],
+                            error=PUBLIC_UPSTREAM_ERROR,
                             latency_ms=int((time.time() - t0) * 1000),
                             prompt_chars=len(prompt_text),
                             override=req.provider,
                             attempted=_attempts_str(all_attempts),
-                            agent=req.agent,
+                            agent=accounting_agent,
                             session=req.session,
                             retries=retries,
                         )
-                        yield f"data: {json.dumps({'error': str(e)[:300]})}\n\n"
+                        yield f"data: {json.dumps({'error': PUBLIC_UPSTREAM_ERROR})}\n\n"
 
                 return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -494,6 +510,11 @@ async def chat(req: ChatRequest, request: Request):
                 retryable = (status is not None and 500 <= status < 600) or status == 408 or "timeout" in msg
                 if not retryable:
                     raise
+                logger.warning(
+                    "Retrying transient upstream request failure (provider=%s)",
+                    name,
+                    exc_info=True,
+                )
                 await _asyncio.sleep(min(2.0, 0.5 * (2**retries)))
                 retries += 1
                 result = await provider.chat(
@@ -542,7 +563,7 @@ async def chat(req: ChatRequest, request: Request):
             if router_decision is not None:
                 router_decision.chosen_worker_provider = name
                 router_decision.chosen_worker_model = result["model"]
-            db.log_call(
+            ledger.log_call(
                 provider=name,
                 model=result["model"],
                 input_tokens=result["input_tokens"],
@@ -560,7 +581,7 @@ async def chat(req: ChatRequest, request: Request):
                 tool_dialect=result["tool_call_dialect"],
                 call_role="worker",
                 router_decision=router_decision.tier if router_decision else None,
-                agent=req.agent,
+                agent=accounting_agent,
                 session=req.session,
                 retries=retries,
             )
@@ -583,79 +604,114 @@ async def chat(req: ChatRequest, request: Request):
                 retries=retries,
             ).model_dump()
         except P.ProviderError as e:
-            last_err = str(e)
+            logger.exception("Upstream provider request failed (provider=%s)", name)
             secs, reason = _backoff_for(e, has_model_override=bool(req.model))
             if secs > 0:
                 rtr.state[name].mark_unavailable(secs, reason)
-            db.log_call(
+            ledger.log_call(
                 provider=name,
                 model=req.model or provider.model,
                 status="error",
-                error=str(e)[:500],
+                error=PUBLIC_UPSTREAM_ERROR,
                 latency_ms=int((time.time() - t0) * 1000),
                 prompt_chars=len(prompt_text),
                 override=req.provider,
                 attempted=_attempts_str(all_attempts),
-                agent=req.agent,
+                agent=accounting_agent,
                 session=req.session,
                 retries=retries,
             )
-            tag = f"failed: {str(e)[:100]}"
-            if secs > 0:
-                tag += f" → backoff {secs:.0f}s ({reason})"
-            all_attempts.append({"provider": name, "reason": tag})
+            all_attempts.append({"provider": name, "reason": PUBLIC_UPSTREAM_ERROR})
             if explicit_override or not getattr(e, "retryable", True):
-                raise HTTPException(502, f"{name} failed: {e}")
+                raise HTTPException(502, PUBLIC_UPSTREAM_ERROR)
             candidates = [c for c in candidates if c != name]
             continue
         except HTTPException:
             raise
         except Exception as e:
-            last_err = str(e)
+            logger.exception("Unexpected upstream request failure (provider=%s)", name)
             secs, reason = _backoff_for(e, has_model_override=bool(req.model))
             if secs > 0:
                 rtr.state[name].mark_unavailable(secs, reason)
-            db.log_call(
+            ledger.log_call(
                 provider=name,
                 model=req.model or provider.model,
                 status="error",
-                error=str(e)[:500],
+                error=PUBLIC_UPSTREAM_ERROR,
                 latency_ms=int((time.time() - t0) * 1000),
                 prompt_chars=len(prompt_text),
                 override=req.provider,
                 attempted=_attempts_str(all_attempts),
-                agent=req.agent,
+                agent=accounting_agent,
                 session=req.session,
                 retries=retries,
             )
-            all_attempts.append({"provider": name, "reason": f"exception: {str(e)[:120]}"})
+            all_attempts.append({"provider": name, "reason": PUBLIC_UPSTREAM_ERROR})
             if explicit_override:
-                raise HTTPException(502, f"{name} failed: {e}")
+                raise HTTPException(502, PUBLIC_UPSTREAM_ERROR)
             candidates = [c for c in candidates if c != name]
             continue
 
-    raise HTTPException(503, f"all providers unavailable. attempts: {all_attempts}. last_error: {last_err}")
+    raise HTTPException(503, PUBLIC_UPSTREAM_ERROR)
+
+
+@router.post("/v1/chat")
+async def chat(
+    req: ChatRequest,
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+):
+    principal = authorize_tool_request(
+        request,
+        authorization,
+        tool="llm.chat",
+        expected_models={req.model},
+    )
+    accounting_agent = principal.slot if principal.kind == "slot" else req.agent
+    return await _chat_impl(req, request, accounting_agent=accounting_agent)
 
 
 @router.post("/v1/chat/batch")
-async def chat_batch(req: BatchChatRequest, request: Request):
+async def chat_batch(
+    req: BatchChatRequest,
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+):
+    principal = authorize_tool_request(
+        request,
+        authorization,
+        tool="llm.chat.batch",
+        expected_models={call.model for call in req.calls},
+    )
     sem = _asyncio.Semaphore(max(1, req.max_concurrency))
 
     async def _one(call: ChatRequest):
         async with sem:
             try:
-                return await chat(call, request)
+                accounting_agent = principal.slot if principal.kind == "slot" else call.agent
+                return await _chat_impl(call, request, accounting_agent=accounting_agent)
             except HTTPException as he:
                 return {"error": str(he.detail), "status_code": he.status_code}
-            except Exception as e:
-                return {"error": str(e)[:400], "status_code": 500}
+            except Exception:
+                logger.exception("Unexpected batch chat failure")
+                return {"error": PUBLIC_UPSTREAM_ERROR, "status_code": 500}
 
     results = await _asyncio.gather(*[_one(c) for c in req.calls])
     return {"results": results}
 
 
 @router.post("/v1/vision")
-async def vision(req: VisionRequest, request: Request):
+async def vision(
+    req: VisionRequest,
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+):
+    principal = authorize_tool_request(
+        request,
+        authorization,
+        tool="llm.vision",
+        expected_models={req.model},
+    )
     content: list[dict[str, Any]] = [{"type": "text", "text": req.prompt}]
     content.append({"type": "image_url", "image_url": {"url": req.image}})
     inner = ChatRequest(
@@ -673,11 +729,18 @@ async def vision(req: VisionRequest, request: Request):
         agent=req.agent,
         session=req.session,
     )
-    return await chat(inner, request)
+    accounting_agent = principal.slot if principal.kind == "slot" else req.agent
+    return await _chat_impl(inner, request, accounting_agent=accounting_agent)
 
 
 @router.post("/v1/embed")
-async def embed(req: EmbedRequest, request: Request):
+async def embed(
+    req: EmbedRequest,
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+):
+    principal = authorize_tool_request(request, authorization, tool="llm.embed")
+    accounting_agent = principal.slot if principal.kind == "slot" else None
     from glc import embedders as E
 
     state = request.app.state
@@ -700,34 +763,38 @@ async def embed(req: EmbedRequest, request: Request):
         )
     except E.EmbedderError as e:
         latency = int((time.time() - t0) * 1000)
-        db.log_call(
+        logger.exception("Embedding provider request failed (provider=%s)", req.provider or "(any)")
+        request.app.state.ledger.log_call(
             provider=req.provider or "(any)",
             model="(none)",
             status="error",
-            error=str(e)[:500],
+            error=PUBLIC_UPSTREAM_ERROR,
             latency_ms=latency,
             prompt_chars=len(req.text),
             override=req.provider,
             call_role="embed",
+            agent=accounting_agent,
         )
         if req.provider:
             if e.status == 429:
-                raise HTTPException(429, f"{req.provider} rate-limited: {e}")
+                raise HTTPException(429, PUBLIC_UPSTREAM_ERROR)
             if e.status == 400:
-                raise HTTPException(400, str(e))
-            raise HTTPException(502, f"{req.provider} embed failed: {e}")
-        raise HTTPException(503, str(e))
+                raise HTTPException(400, PUBLIC_UPSTREAM_ERROR)
+            raise HTTPException(502, PUBLIC_UPSTREAM_ERROR)
+        raise HTTPException(503, PUBLIC_UPSTREAM_ERROR)
 
-    db.log_call(
+    public_attempts = _public_attempts(attempts)
+    request.app.state.ledger.log_call(
         provider=name,
         model=result["model"],
         status="ok",
         latency_ms=latency,
         prompt_chars=len(req.text),
         override=req.provider,
-        attempted=_attempts_str(attempts),
+        attempted=_attempts_str(public_attempts),
         call_role="embed",
         embed_dim=result["dim"],
+        agent=accounting_agent,
     )
     return EmbedResponse(
         provider=name,
@@ -735,11 +802,11 @@ async def embed(req: EmbedRequest, request: Request):
         embedding=result["embedding"],
         dim=result["dim"],
         latency_ms=latency,
-        attempted=attempts,
+        attempted=public_attempts,
     ).model_dump()
 
 
-@router.get("/v1/embedders")
+@router.get("/v1/embedders", dependencies=[Depends(require_install_token)])
 async def list_embedders(request: Request):
     from glc import embedders as E
 
@@ -751,15 +818,15 @@ async def list_embedders(request: Request):
         "max_input_chars": E.MAX_INPUT_CHARS,
         "backoff_steps_s": E.BACKOFF_STEPS,
         "live": {e.name: e.state.snapshot() for e in state.embedders},
-        "today": db.aggregate(call_role="embed"),
+        "today": request.app.state.ledger.aggregate(call_role="embed"),
     }
 
 
-@router.get("/v1/cost/by_agent")
-async def cost_by_agent(session: str | None = None, agent: str | None = None):
+@router.get("/v1/cost/by_agent", dependencies=[Depends(require_install_token)])
+async def cost_by_agent(request: Request, session: str | None = None, agent: str | None = None):
     from glc import pricing as _pricing
 
-    raw = db.by_agent(session=session)
+    raw = request.app.state.ledger.by_agent(session=session)
     if agent:
         raw = {agent: raw.get(agent, [])}
     out: dict[str, list[dict]] = {}
@@ -772,7 +839,7 @@ async def cost_by_agent(session: str | None = None, agent: str | None = None):
     return out
 
 
-@router.get("/v1/providers")
+@router.get("/v1/providers", dependencies=[Depends(require_install_token)])
 async def list_providers(request: Request):
     r = request.app.state.router
     return {
@@ -784,7 +851,7 @@ async def list_providers(request: Request):
     }
 
 
-@router.get("/v1/capabilities")
+@router.get("/v1/capabilities", dependencies=[Depends(require_install_token)])
 async def capabilities(request: Request):
     r = request.app.state.router
     out = {}
@@ -803,18 +870,18 @@ async def capabilities(request: Request):
     return out
 
 
-@router.get("/v1/status")
+@router.get("/v1/status", dependencies=[Depends(require_install_token)])
 async def status(request: Request):
     r = request.app.state.router
     return {
         "order": r.order,
         "live": r.all_status(),
-        "today": db.aggregate(call_role="worker"),
+        "today": request.app.state.ledger.aggregate(call_role="worker"),
         "limits": LIMITS,
     }
 
 
-@router.get("/v1/routers")
+@router.get("/v1/routers", dependencies=[Depends(require_install_token)])
 async def routers(request: Request):
     rp = request.app.state.router_pool
     return {
@@ -822,12 +889,23 @@ async def routers(request: Request):
         "providers": list(rp.providers.keys()),
         "models": {n: p.model for n, p in rp.providers.items()},
         "live": rp.all_status(),
-        "today": db.aggregate(call_role="router"),
+        "today": request.app.state.ledger.aggregate(call_role="router"),
         "limits": {k: LIMITS[k] for k in rp.providers},
         "tier_to_order": TIER_TO_ORDER,
     }
 
 
-@router.get("/v1/calls")
-async def calls(limit: int = 100, provider: str | None = None, status: str | None = None):
-    return db.recent(limit=limit, provider=provider, status=status)
+@router.get("/v1/calls", dependencies=[Depends(require_install_token)])
+async def calls(
+    request: Request,
+    limit: int = 100,
+    provider: str | None = None,
+    status: str | None = None,
+):
+    rows = request.app.state.ledger.recent(limit=limit, provider=provider, status=status)
+    for row in rows:
+        if row.get("error"):
+            row["error"] = PUBLIC_UPSTREAM_ERROR
+        if row.get("attempted"):
+            row["attempted"] = _sanitize_persisted_attempted(row["attempted"])
+    return rows

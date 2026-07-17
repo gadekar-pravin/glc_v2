@@ -1,9 +1,8 @@
 """Production webhook receiver + gateway bridge for Twilio SMS/MMS.
 
 Twilio delivers inbound messages as an `application/x-www-form-urlencoded`
-POST. Before trusting a payload (the From number drives the trust level!)
-we MUST verify Twilio's `X-Twilio-Signature` header, otherwise anyone can
-forge a webhook that spoofs the owner's phone and gain owner_paired access.
+POST. Twilio's `X-Twilio-Signature` is verified before provider facts are
+forwarded. Authoritative pairing and trust remain gateway-only decisions.
 
 Pieces here:
   - `compute_signature` / `validate_signature`: pure, framework-free helpers
@@ -39,13 +38,13 @@ from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, Request, Response
 
-from glc.channels.envelope import ChannelMessage, ChannelReply
+from glc.channels.envelope import ChannelIngress, ChannelReply
 
 WEBHOOK_PATH = "/webhooks/twilio_sms"
 
 # Callback the receiver invokes with each parsed inbound envelope. The runner
 # supplies one that bridges to the gateway and sends the reply.
-HandleMessage = Callable[[ChannelMessage], Awaitable[Any]]
+HandleMessage = Callable[[ChannelIngress], Awaitable[Any]]
 
 
 def compute_signature(auth_token: str, url: str, params: dict[str, Any]) -> str:
@@ -69,13 +68,13 @@ def _skip_signature() -> bool:
 
 
 async def gateway_roundtrip(
-    envelope: ChannelMessage,
+    envelope: ChannelIngress,
     *,
     host: str = "localhost",
     port: int = 8111,
     token: str | None = None,
 ) -> ChannelReply | dict[str, Any]:
-    """Ship a ChannelMessage to the GLC gateway over WS and read the reply.
+    """Ship a ChannelIngress to the GLC gateway over WS and read the reply.
 
     Connects as a WebSocket client to `ws://{host}:{port}/v1/channels/<name>`,
     authenticating with the install token, sends the envelope JSON, and reads
@@ -84,9 +83,9 @@ async def gateway_roundtrip(
     """
     import websockets
 
-    from glc.config import get_or_create_install_token
-
-    token = token or get_or_create_install_token()
+    token = token or os.getenv("GLC_SLOT_IDENTITY_TWILIO_SMS", "").strip()
+    if not token:
+        raise RuntimeError("GLC_SLOT_IDENTITY_TWILIO_SMS is not configured")
     uri = f"ws://{host}:{port}/v1/channels/{envelope.channel}"
     async with websockets.connect(uri, additional_headers={"Authorization": f"Bearer {token}"}) as ws:
         await ws.send(envelope.model_dump_json())
@@ -108,7 +107,7 @@ def build_app(
 
     `adapter` is a twilio_sms Adapter instance (constructed if omitted).
     `handle_message` is an async callback invoked with each parsed
-    ChannelMessage; the runner wires it to gateway_roundtrip + adapter.send.
+    ChannelIngress; the runner wires it to gateway_roundtrip + adapter.send.
     When omitted the receiver just parses (useful for smoke tests).
     """
     from . import artifacts

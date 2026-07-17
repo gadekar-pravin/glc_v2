@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from glc.channels.envelope import Attachment, ChannelMessage, ChannelReply
+from glc.channels.envelope import Attachment, ChannelIngress, ChannelMessage, ChannelReply
 
 
 def test_channel_message_minimum_valid():
@@ -52,6 +52,24 @@ def test_trust_level_literal_enforced():
             trust_level="god_mode",
             arrived_at=datetime.now(UTC),
         )
+
+
+def test_channel_ingress_accepts_legacy_trust_but_does_not_require_it():
+    current = ChannelIngress(
+        channel="telegram",
+        channel_user_id="42",
+        user_handle="me",
+        arrived_at=datetime.now(UTC),
+    )
+    legacy = ChannelIngress(
+        channel="discord",
+        channel_user_id="42",
+        user_handle="me",
+        trust_level="owner_paired",
+        arrived_at=datetime.now(UTC),
+    )
+    assert current.trust_level is None
+    assert legacy.trust_level == "owner_paired"
 
 
 def test_attachment_kind_enforced():

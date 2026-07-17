@@ -12,14 +12,12 @@ single-responsibility modules beside it:
   connection.py   — IMAP session manager (IDLE, exponential reconnect)
   server.py       — live demo (Zoho Mail poll loop)
 
-Inbound pipeline  on_message(raw) → ChannelMessage | None
+Inbound pipeline  on_message(raw) → ChannelIngress | None
 ─────────────────────────────────────────────────────────
   1. mime_parser.parse()        → ParsedEmail (text, attachments, headers)
-  2. trust_level.classify()     → owner_paired | user_paired | untrusted
-  3. Public-channel gate        → drop untrusted in public-channel mode
-  4. _store_attachment()        → art:<sha> ref per MIME part
-  5. uid_tracker.mark_seen()    → dedup on reconnect (live mode only)
-  6. Build ChannelMessage        → typed envelope to agent runtime
+  2. _store_attachment()       → art:<sha> ref per MIME part
+  3. uid_tracker.mark_seen()   → dedup on reconnect (live mode only)
+  4. Build ChannelIngress      → untrusted facts for the gateway
 
 Outbound pipeline  send(reply) → dict
 ─────────────────────────────────────
@@ -46,8 +44,7 @@ from glc.channels.catalogue.imap.artifacts import ArtifactStore
 from glc.channels.catalogue.imap.mime_parser import parse as _mime_parse
 from glc.channels.catalogue.imap.smtp_sender import SmtpSender
 from glc.channels.catalogue.imap.uid_tracker import UidTracker
-from glc.channels.envelope import Attachment, ChannelMessage, ChannelReply
-from glc.security.trust_level import classify
+from glc.channels.envelope import Attachment, ChannelIngress, ChannelReply
 
 _BOT_FROM = "bot@example.com"
 
@@ -143,15 +140,15 @@ class Adapter(ChannelAdapter):
     # ChannelAdapter interface
     # ------------------------------------------------------------------
 
-    async def on_message(self, raw: Any) -> ChannelMessage | None:  # type: ignore[override]
-        """Parse a raw IMAP FETCH envelope into a ChannelMessage.
+    async def on_message(self, raw: Any) -> ChannelIngress | None:  # type: ignore[override]
+        """Parse a raw IMAP FETCH envelope into a ChannelIngress.
 
         Accepts:
           - {"uid": int, "raw": bytes}   — standard IMAP FETCH dict
           - bare bytes                   — direct injection (tests)
 
-        Returns None on empty input, unparseable MIME, or when an
-        untrusted sender is silently dropped in public-channel mode.
+        Returns None on empty input or unparseable MIME. Valid ingress is
+        always emitted for gateway-side trust and allowlist classification.
         """
         # Transparent IDLE/disconnect handling: the IDLE connection can
         # drop without notice. Consuming the disconnect signal here lets
@@ -178,30 +175,23 @@ class Adapter(ChannelAdapter):
             if parsed.references:
                 self._references_cache[parsed.message_id] = parsed.references
 
-        # 3. Trust classification using the bare sender address
-        trust_level = classify(self.name, parsed.sender)
-
-        # 4. Public-channel gate: silently drop untrusted senders
-        if self.is_public_channel and trust_level == "untrusted":
-            return None
-
-        # 5. Store all attachment blobs → art:<sha> refs
+        # 3. Store all attachment blobs → art:<sha> refs
         attachments: list[Attachment] = [self._store_attachment(att) for att in parsed.attachments]
 
-        # 6. Mark UID as processed (live mode only — prevents reprocessing
+        # 4. Mark UID as processed (live mode only — prevents reprocessing
         #    on reconnect without relying on server-side \Seen flag alone)
         if self._uid_tracker is not None and uid is not None:
             self._uid_tracker.mark_seen(self._mailbox, uid)
 
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=parsed.sender,
             user_handle=parsed.sender,
             text=parsed.text,
-            trust_level=trust_level,
             arrived_at=datetime.now().astimezone(),
             attachments=attachments,
             thread_id=parsed.message_id,
+            metadata={"is_public_channel": bool(self.is_public_channel), "was_mentioned": False},
         )
 
     async def send(self, reply: ChannelReply) -> Any:

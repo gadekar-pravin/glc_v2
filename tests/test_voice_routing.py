@@ -8,6 +8,7 @@ for TTS (system_fallback ships working). Tests inject fakes through
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from glc.voice.stt import STTError, transcribe
@@ -88,6 +89,64 @@ async def test_transcribe_default_when_stub_returns_501():
 async def test_transcribe_unknown_prefer_errors():
     with pytest.raises(STTError):
         await transcribe(b"", "audio/wav", prefer="ultraseaweed")
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_status"),
+    [
+        pytest.param(httpx.ReadTimeout("slow"), 504, id="timeout"),
+        pytest.param(httpx.ConnectError("offline"), 502, id="connect"),
+    ],
+)
+async def test_remote_transcribe_maps_transport_failures(monkeypatch, failure, expected_status):
+    import glc.voice.remote as remote
+
+    class FailingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):  # noqa: ARG002
+            raise failure
+
+    monkeypatch.setenv("GLC_VOICE_URL_STT_GROQ_WHISPER", "https://voice.test")
+    monkeypatch.setenv("GLC_SLOT_IDENTITY_STT_GROQ_WHISPER", "mock-identity")
+    monkeypatch.setattr(remote.httpx, "AsyncClient", lambda **kwargs: FailingClient())
+
+    with pytest.raises(STTError) as exc_info:
+        await remote.remote_transcribe("stt_groq_whisper", b"audio", "audio/wav")
+    assert exc_info.value.status == expected_status
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_status"),
+    [
+        pytest.param(httpx.ReadTimeout("slow"), 504, id="timeout"),
+        pytest.param(httpx.ConnectError("offline"), 502, id="connect"),
+    ],
+)
+async def test_remote_synthesize_maps_transport_failures(monkeypatch, failure, expected_status):
+    import glc.voice.remote as remote
+
+    class FailingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):  # noqa: ARG002
+            raise failure
+
+    monkeypatch.setenv("GLC_VOICE_URL_TTS_CARTESIA", "https://voice.test")
+    monkeypatch.setenv("GLC_SLOT_IDENTITY_TTS_CARTESIA", "mock-identity")
+    monkeypatch.setattr(remote.httpx, "AsyncClient", lambda **kwargs: FailingClient())
+
+    with pytest.raises(TTSError) as exc_info:
+        await remote.remote_synthesize("tts_cartesia", "hello")
+    assert exc_info.value.status == expected_status
 
 
 # ── TTS ──────────────────────────────────────────────────────────────

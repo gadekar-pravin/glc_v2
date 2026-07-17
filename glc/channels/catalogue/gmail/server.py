@@ -26,8 +26,6 @@ from googleapiclient.discovery import build
 from glc.channels.catalogue.gmail.adapter import Adapter
 from glc.channels.catalogue.gmail.artifacts import cleanup_expired
 from glc.channels.envelope import ChannelReply
-from glc.security.pairing import get_pairing_store
-from glc.security.trust_level import classify
 
 logging.basicConfig(
     level=logging.INFO,
@@ -202,16 +200,14 @@ def main():
     print()
 
     OWNER_EMAIL = os.environ.get("GLC_GMAIL_OWNER")
-    store = get_pairing_store()
     if OWNER_EMAIL:
-        store.force_pair_owner("gmail", OWNER_EMAIL, user_handle="owner")
-        print(section("[+]", "Owner Paired"))
+        print(section("[*]", "Owner Provisioning"))
         print(field("email", OWNER_EMAIL, GREEN))
-        print(field("trust", "owner_paired", GREEN))
+        print(field("action", "pair through gateway /v1/control/pair + /confirm", YELLOW))
     else:
-        print(section("[!]", "No owner paired"))
+        print(section("[!]", "No owner configured for setup guidance"))
         print(field("set", "export GLC_GMAIL_OWNER=you@gmail.com", YELLOW))
-        print(field("note", "All senders will be classified as untrusted", DIM))
+        print(field("note", "Gateway pairing state remains authoritative", DIM))
     print()
 
     last_history_id = int(profile["historyId"])
@@ -325,23 +321,17 @@ def main():
                         )
                         print()
 
-                        # Step 4: Extract sender + resolve trust (before expensive parsing)
-                        print(f"  {BOLD}Step 4: _extract_email(From header) + _resolve_trust_level(){RESET}")
+                        # Step 4: Extract sender; the gateway resolves trust after ingress.
+                        print(f"  {BOLD}Step 4: _extract_email(From header){RESET}")
                         print(f'     {DIM}IN:{RESET}  From: "{sender}"')
                         print(f'     {DIM}DO:{RESET}  Strip display name → "{sender_bare}"')
-                        trust = classify("gmail", sender_bare)
-                        trust_color = (
-                            GREEN if trust == "owner_paired" else YELLOW if trust == "user_paired" else RED
-                        )
-                        print("         SELECT trust_level FROM pairings")
-                        print(f"         WHERE channel='gmail' AND channel_user_id='{sender_bare}'")
-                        print(f"     {DIM}OUT:{RESET} {trust_color}trust_level = {trust}{RESET}")
+                        print(f"     {DIM}OUT:{RESET} sender identity facts; trust assigned by gateway")
                         print()
 
                         msg = asyncio.run(adapter.on_message(envelope))
 
                         if msg is None:
-                            print(f"  {RED}DROPPED — untrusted sender in public channel mode{RESET}")
+                            print(f"  {RED}DROPPED — invalid or ignored Gmail event{RESET}")
 
                         else:
                             n_att = len(msg.attachments)
@@ -378,7 +368,7 @@ def main():
                             print()
                             print(f'     {DIM}channel         ={RESET} {WHITE}"gmail"{RESET}')
                             print(f'     {DIM}channel_user_id ={RESET} {WHITE}"{msg.channel_user_id}"{RESET}')
-                            print(f"     {DIM}trust_level     ={RESET} {trust_color}{msg.trust_level}{RESET}")
+                            print(f"     {DIM}trust_level     ={RESET} {YELLOW}assigned by gateway{RESET}")
                             print(f'     {DIM}thread_id       ={RESET} {WHITE}"{msg.thread_id}"{RESET}')
                             print(
                                 f'     {DIM}text            ={RESET} {WHITE}"{(msg.text or "").strip()[:500]}"{RESET}'

@@ -14,9 +14,10 @@ from datetime import datetime
 import pytest
 
 from glc.channels.catalogue.twilio_sms.adapter import Adapter
-from glc.channels.envelope import Attachment, ChannelMessage, ChannelReply
+from glc.channels.envelope import Attachment, ChannelIngress, ChannelReply
 from glc.security.pairing import get_pairing_store
 from tests.channels.mocks.twilio_sms_mock import OWNER_ID, STRANGER_ID, TwilioSmsMock
+from tests.pairing_helpers import pair_owner as seed_owner
 
 
 @pytest.fixture
@@ -27,7 +28,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("twilio_sms", OWNER_ID, user_handle="owner")
+    seed_owner(store, "twilio_sms", OWNER_ID, user_handle="owner")
     yield
     store.revoke("twilio_sms", OWNER_ID)
 
@@ -37,10 +38,10 @@ async def test_on_message_owner_returns_valid_envelope(mock, pair_owner):
     adapter = Adapter(config={"mock": mock})
     ev = mock.queue_owner_message("hello from owner")
     msg = await adapter.on_message(ev)
-    assert isinstance(msg, ChannelMessage)
+    assert isinstance(msg, ChannelIngress)
     assert msg.channel == "twilio_sms"
     assert msg.channel_user_id == OWNER_ID
-    assert msg.trust_level == "owner_paired"
+    assert msg.trust_level is None
     assert msg.text == "hello from owner"
     assert isinstance(msg.arrived_at, datetime)
 
@@ -52,7 +53,7 @@ async def test_on_message_stranger_is_untrusted(mock):
     msg = await adapter.on_message(ev)
     assert msg is not None
     assert msg.channel_user_id == STRANGER_ID
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
 
 
 @pytest.mark.asyncio
@@ -94,7 +95,7 @@ async def test_allowlist_silently_drops_stranger_in_public(mock):
     adapter = Adapter(config={"mock": mock, "is_public_channel": True})
     ev = mock.queue_stranger_message("hi from public")
     msg = await adapter.on_message(ev)
-    assert msg is None or msg.trust_level == "untrusted"
+    assert msg is None or msg.trust_level is None
 
 
 @pytest.mark.asyncio

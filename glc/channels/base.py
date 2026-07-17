@@ -7,7 +7,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from glc.channels.envelope import ChannelMessage, ChannelReply
+from glc.channels.envelope import ChannelIngress, ChannelReply
 
 
 class ChannelAdapter(ABC):
@@ -17,13 +17,13 @@ class ChannelAdapter(ABC):
         self.config = config or {}
 
     @abstractmethod
-    async def on_message(self, raw: Any) -> ChannelMessage:
-        """Translate a native wire-format event into a ChannelMessage.
+    async def on_message(self, raw: Any) -> ChannelIngress | None:
+        """Translate a native wire-format event into a ChannelIngress.
 
         The wire format is channel-specific (Telegram Update, Discord
-        gateway dispatch, Slack event payload, ...). The translation
-        includes classifying the trust level via
-        glc.security.trust_level.classify().
+        gateway dispatch, Slack event payload, ...).  Adapters report provider
+        facts only; the gateway assigns the authenticated channel and trust
+        level. Events that an adapter ignores are represented by ``None``.
         """
         raise NotImplementedError("Group assignment: implement on_message and send in this adapter.")
 

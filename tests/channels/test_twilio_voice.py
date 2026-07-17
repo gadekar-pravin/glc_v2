@@ -5,7 +5,7 @@ https://www.twilio.com/docs/voice/twiml
 https://www.twilio.com/docs/voice/twiml/stream
 
 Six structural tests + one behavioural test (TwiML on call-in,
-media-stream frame → ChannelMessage with voice_audio_ref).
+media-stream frame → ChannelIngress with voice_audio_ref).
 """
 
 from __future__ import annotations
@@ -16,13 +16,14 @@ from datetime import datetime
 import pytest
 
 from glc.channels.catalogue.twilio_voice.adapter import Adapter
-from glc.channels.envelope import ChannelMessage, ChannelReply
+from glc.channels.envelope import ChannelIngress, ChannelReply
 from glc.security.pairing import get_pairing_store
 from tests.channels.mocks.twilio_voice_mock import (
     OWNER_ID,
     STRANGER_ID,
     TwilioVoiceMock,
 )
+from tests.pairing_helpers import pair_owner as seed_owner
 
 
 @pytest.fixture
@@ -33,7 +34,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("twilio_voice", OWNER_ID, user_handle="owner")
+    seed_owner(store, "twilio_voice", OWNER_ID, user_handle="owner")
     yield
     store.revoke("twilio_voice", OWNER_ID)
 
@@ -43,10 +44,10 @@ async def test_on_message_owner_returns_valid_envelope(mock, pair_owner):
     adapter = Adapter(config={"mock": mock})
     ev = mock.queue_owner_message("ringing")
     msg = await adapter.on_message(ev)
-    assert isinstance(msg, ChannelMessage)
+    assert isinstance(msg, ChannelIngress)
     assert msg.channel == "twilio_voice"
     assert msg.channel_user_id == OWNER_ID
-    assert msg.trust_level == "owner_paired"
+    assert msg.trust_level is None
     assert isinstance(msg.arrived_at, datetime)
 
 
@@ -57,7 +58,7 @@ async def test_on_message_stranger_is_untrusted(mock):
     msg = await adapter.on_message(ev)
     assert msg is not None
     assert msg.channel_user_id == STRANGER_ID
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
 
 
 @pytest.mark.asyncio
@@ -101,7 +102,7 @@ async def test_allowlist_silently_drops_stranger_in_public(mock):
     adapter = Adapter(config={"mock": mock, "is_public_channel": True})
     ev = mock.queue_stranger_message("ringing")
     msg = await adapter.on_message(ev)
-    assert msg is None or msg.trust_level == "untrusted"
+    assert msg is None or msg.trust_level is None
 
 
 @pytest.mark.asyncio
@@ -111,7 +112,7 @@ async def test_channel_specific_behaviour_call_to_twiml_then_media(mock, pair_ow
          back to the GLC voice WebSocket.
       2. Media-stream frame → adapter decodes base64 mu-law audio,
          transcribes via `mock.transcribe(bytes)`, persists the bytes
-         to the artifact store, and surfaces a ChannelMessage with
+         to the artifact store, and surfaces a ChannelIngress with
          `voice_audio_ref` set to the artifact handle and `text` set
          to the transcript.
     Adapters that drop step 2 cannot ever hear the caller speak."""
@@ -130,7 +131,7 @@ async def test_channel_specific_behaviour_call_to_twiml_then_media(mock, pair_ow
     )
 
     # Step 2: media frame arrives, must be transcribed and turned into
-    # a ChannelMessage with voice_audio_ref.
+    # a ChannelIngress with voice_audio_ref.
     frame = mock.queue_media_frame(audio_bytes=b"\xff\x7f" * 100)
     msg2 = await adapter.on_message(frame)
     assert msg2 is not None

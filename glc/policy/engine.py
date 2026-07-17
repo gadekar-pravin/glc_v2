@@ -1,20 +1,26 @@
-"""Declarative policy engine.
+"""Pure declarative policy evaluator used by the isolated policy worker.
 
 evaluate(tool_call, context) -> PolicyVerdict
-  - first matching rule wins
-  - ties resolve to deny
+  - any matching deny takes precedence over matching allows, regardless of order
+  - otherwise the first matching rule wins
   - default allow when trust_level == 'owner_paired' and no rule matches
   - default deny otherwise
 
-Hot reload on SIGHUP (process-level handler installed by main.py). Malformed
-yaml is rejected: the engine falls back to a deny-everything safe-default
-config and logs a warning so the gateway boots in a known-safe state.
+This module deliberately exposes no process-wide singleton or module-level
+``evaluate`` function.  The gateway talks to :mod:`glc.policy.worker` through
+``ProcessPolicyClient`` so rebinding names in this interpreter cannot alter
+the evaluator running in the child process.
+
+Malformed yaml is rejected: the evaluator falls back to a deny-everything
+safe-default config and logs a warning so the gateway boots in a known-safe
+state.
 """
 
 from __future__ import annotations
 
 import fnmatch
 import re
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -93,7 +99,10 @@ class PolicyEngine:
             raw = yaml.safe_load(p.read_text()) or {}
             cfg = PolicyConfig.model_validate(raw)
         except Exception as e:  # pragma: no cover
-            print(f"[glc.policy] malformed {p}: {e!r} — using deny-everything safe default")
+            print(
+                f"[glc.policy] malformed {p}: {e!r} — using deny-everything safe default",
+                file=sys.stderr,
+            )
             cfg = _SAFE_DEFAULT
         return cls(cfg)
 
@@ -141,29 +150,3 @@ class PolicyEngine:
         new = PolicyEngine.from_yaml(path)
         with self._lock:
             self.config = new.config
-
-
-# Module-level singleton, lazily constructed from config.policy_yaml_path().
-_engine: PolicyEngine | None = None
-_engine_lock = threading.Lock()
-
-
-def get_engine() -> PolicyEngine:
-    global _engine
-    with _engine_lock:
-        if _engine is None:
-            from glc.config import policy_yaml_path
-
-            _engine = PolicyEngine.from_yaml(policy_yaml_path())
-    return _engine
-
-
-def reload_engine() -> None:
-    from glc.config import policy_yaml_path
-
-    eng = get_engine()
-    eng.reload(policy_yaml_path())
-
-
-def evaluate(tool_call: dict[str, Any], context: dict[str, Any]) -> PolicyVerdict:
-    return get_engine().evaluate(tool_call, context)

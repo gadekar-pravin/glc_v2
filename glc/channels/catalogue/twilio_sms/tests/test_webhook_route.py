@@ -18,22 +18,21 @@ from glc.channels.catalogue.twilio_sms.webhook import (
     build_app,
     compute_signature,
 )
-from glc.channels.envelope import ChannelMessage
+from glc.channels.envelope import ChannelIngress
 
 AUTH_TOKEN = "test_token_abc123"
 BASE = "http://testserver"
 
 
 class FakeAdapter:
-    """Minimal adapter: parses a form into a ChannelMessage."""
+    """Minimal adapter: parses a form into a ChannelIngress."""
 
     async def on_message(self, form):
-        return ChannelMessage(
+        return ChannelIngress(
             channel="twilio_sms",
             channel_user_id=form.get("From", ""),
             user_handle=form.get("From", ""),
             text=form.get("Body") or None,
-            trust_level="owner_paired",
             arrived_at=datetime.now(UTC),
         )
 
@@ -46,7 +45,7 @@ def env(tmp_path, monkeypatch):
 
 
 def _client_and_seen():
-    seen: list[ChannelMessage] = []
+    seen: list[ChannelIngress] = []
 
     async def handle_message(msg):
         seen.append(msg)
@@ -65,7 +64,7 @@ def test_valid_signature_accepted_and_handled():
     assert resp.status_code == 200
     assert "<Response></Response>" in resp.text
     assert len(seen) == 1
-    assert isinstance(seen[0], ChannelMessage)
+    assert isinstance(seen[0], ChannelIngress)
     assert seen[0].channel_user_id == "+19999999999"
     assert seen[0].text == "hi"
 

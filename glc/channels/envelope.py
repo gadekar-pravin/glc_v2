@@ -41,6 +41,30 @@ class ChannelMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ChannelIngress(BaseModel):
+    """Untrusted adapter-to-gateway envelope.
+
+    ``channel`` and ``trust_level`` remain accepted for compatibility with
+    existing slot clients, but neither field is authoritative.  The declared
+    channel must match the authenticated WebSocket route; the gateway then
+    binds the channel to that route and derives trust from its own pairing
+    database before constructing a :class:`ChannelMessage`.
+    """
+
+    channel: str
+    channel_user_id: str
+    user_handle: str
+    text: str | None = None
+    attachments: list[Attachment] = Field(default_factory=list)
+    voice_audio_ref: str | None = None
+    thread_id: str | None = None
+    trust_level: TrustLevel | None = None
+    arrived_at: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class ChannelReply(BaseModel):
     channel: str
     channel_user_id: str

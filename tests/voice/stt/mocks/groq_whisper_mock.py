@@ -29,6 +29,7 @@ class GroqWhisperMock:
     received_multipart: dict | None = None  # last multipart form
     last_model: str | None = None
     last_response_format: str | None = None
+    setup_frame: dict[str, Any] | None = None
 
     async def transcribe(self, audio: bytes, mime: str) -> TranscribeResult:
         self.received_calls.append({"audio_len": len(audio), "mime": mime})

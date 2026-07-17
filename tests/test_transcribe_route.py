@@ -10,7 +10,9 @@ from __future__ import annotations
 import base64
 
 import pytest
+from fastapi.testclient import TestClient
 
+from glc.main import create_app
 from glc.voice.stt.base import STTError, STTProvider, TranscribeResult
 from glc.voice.stt.router import register_test_provider
 
@@ -37,6 +39,23 @@ def test_transcribe_streaming_returns_400(app_client):
     body = {"audio_b64": base64.b64encode(b"\x00\x00").decode(), "mime": "audio/wav", "prefer": "streaming"}
     r = app_client.post("/v1/transcribe", json=body)
     assert r.status_code == 400
+
+
+def test_production_transcribe_streaming_returns_400_before_remote_dispatch(monkeypatch):
+    monkeypatch.setenv("GLC_INSTALL_TOKEN", "production-transcribe-token")
+    body = {
+        "audio_b64": base64.b64encode(b"\x00\x00").decode(),
+        "mime": "audio/wav",
+        "prefer": "streaming",
+    }
+    with TestClient(create_app(production=True)) as client:
+        response = client.post(
+            "/v1/transcribe",
+            json=body,
+            headers={"Authorization": "Bearer production-transcribe-token"},
+        )
+    assert response.status_code == 400
+    assert "WebSocket" in response.json()["detail"]
 
 
 def test_transcribe_bad_base64_returns_400(app_client):

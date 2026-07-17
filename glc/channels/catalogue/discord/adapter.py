@@ -3,14 +3,13 @@
 Translates between Discord's wire format and the canonical channel
 envelope in both directions:
 
-  inbound  : MESSAGE_CREATE dispatch frame  -> ChannelMessage
+  inbound  : MESSAGE_CREATE dispatch frame  -> ChannelIngress
   outbound : ChannelReply                   -> POST /channels/{id}/messages
 
-Trust level is assigned on every inbound message via
-glc.security.trust_level.classify(). In public channels the allowlist is
-consulted before a stranger is processed. The Discord REST/gateway surface
-is injected through config (the test mock, or a real client) so the same
-code path runs under test and in production.
+The adapter reports Discord identity and context facts. The gateway assigns
+trust and enforces allowlists from its private pairing store. The Discord
+REST/gateway surface is injected through config (the test mock, or a real
+client) so the same code path runs under test and in production.
 
 See docs/ADAPTER_GUIDE.md and glc/channels/catalogue/discord/README.md.
 """
@@ -23,10 +22,7 @@ from typing import Any
 
 from glc.channels.base import ChannelAdapter
 from glc.channels.catalogue.discord.schemas import DiscordCreateMessage, DiscordMessage
-from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.security.allowlists import allowed
-from glc.security.pairing import get_pairing_store
-from glc.security.trust_level import classify
+from glc.channels.envelope import ChannelIngress, ChannelReply
 
 CHANNEL = "discord"
 
@@ -59,9 +55,9 @@ class Adapter(ChannelAdapter):
         channels. Opt-in; default off preserves the integrated contract."""
         return bool(self.config.get("enforce_allowlist_in_dm", False))
 
-    # ── inbound: Discord dispatch frame → ChannelMessage ──────────────────
+    # ── inbound: Discord dispatch frame → ChannelIngress ──────────────────
 
-    async def on_message(self, raw: Any) -> ChannelMessage | None:  # type: ignore[override]
+    async def on_message(self, raw: Any) -> ChannelIngress | None:  # type: ignore[override]
         # A dropped gateway connection surfaces as a pending disconnect on the
         # transport. A live adapter resumes the session; for translation we
         # clear the flag and keep processing the delivered event instead of
@@ -82,7 +78,6 @@ class Adapter(ChannelAdapter):
             return None
 
         user_id = msg.author.id
-        trust_level = classify(CHANNEL, user_id)
 
         # Whether the bot itself was addressed. Computed from the raw mention
         # list (not the resolved handles) so it stays correct independent of
@@ -90,29 +85,8 @@ class Adapter(ChannelAdapter):
         bot_id = self.config.get("bot_user_id")
         was_mentioned = bool(bot_id) and any(m.id == str(bot_id) for m in msg.mentions)
 
-        # Allowlist gate. Public channels always gate strangers. DMs are gated
-        # only when the operator opts in via `enforce_allowlist_in_dm` — this
-        # closes the gap where an untrusted stranger could reach the agent in a
-        # DM (token cost + prompt-injection surface) while public strangers are
-        # dropped. Owners pass (subject to the mention-only-in-public rule).
-        # Dropping here, before mention resolution, means rejected messages
-        # incur no get_user() API calls on the rejected sender's behalf.
-        if self._is_public or self._enforce_allowlist_in_dm:
-            owner_ids = [r.channel_user_id for r in get_pairing_store().owners(CHANNEL)]
-            ok, reason = allowed(
-                CHANNEL,
-                user_id,
-                owner_ids=owner_ids,
-                is_public_channel=self._is_public,
-                was_mentioned=was_mentioned,
-            )
-            if not ok:
-                _log.info("discord: dropped message %s from %s: %s", msg.id, user_id, reason)
-                return None
-
         # Resolve mentioned users through the transport's directory so the agent
-        # sees handles, not raw <@id> tokens. Done only after the gate, so we
-        # never look up users for a message we are about to drop.
+        # sees handles, not raw <@id> tokens.
         mentions: list[str] = []
         for m in msg.mentions:
             resolved = None
@@ -122,18 +96,20 @@ class Adapter(ChannelAdapter):
                     resolved = u.get("username") or u.get("global_name")
             mentions.append(resolved or m.username)
 
-        return ChannelMessage(
+        return ChannelIngress(
             channel=CHANNEL,
             channel_user_id=user_id,
             user_handle=msg.author.handle,
             text=msg.content,
             thread_id=msg.channel_id,
-            trust_level=trust_level,
             arrived_at=_parse_ts(msg.timestamp),
             metadata={
                 "message_id": msg.id,
                 "guild_id": msg.guild_id,
                 "mentions": mentions,
+                "is_public_channel": bool(self._is_public),
+                "was_mentioned": was_mentioned,
+                "enforce_allowlist_in_dm": bool(self._enforce_allowlist_in_dm),
             },
         )
 

@@ -14,9 +14,10 @@ from datetime import datetime
 import pytest
 
 from glc.channels.catalogue.slack.adapter import Adapter
-from glc.channels.envelope import ChannelMessage, ChannelReply
+from glc.channels.envelope import ChannelIngress, ChannelReply
 from glc.security.pairing import get_pairing_store
 from tests.channels.mocks.slack_mock import OWNER_ID, STRANGER_ID, SlackMock
+from tests.pairing_helpers import pair_owner as seed_owner
 
 
 @pytest.fixture
@@ -27,7 +28,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("slack", OWNER_ID, user_handle="owner")
+    seed_owner(store, "slack", OWNER_ID, user_handle="owner")
     yield
     store.revoke("slack", OWNER_ID)
 
@@ -37,10 +38,10 @@ async def test_on_message_owner_returns_valid_envelope(mock, pair_owner):
     adapter = Adapter(config={"mock": mock})
     ev = mock.queue_owner_message("hello from owner")
     msg = await adapter.on_message(ev)
-    assert isinstance(msg, ChannelMessage)
+    assert isinstance(msg, ChannelIngress)
     assert msg.channel == "slack"
     assert msg.channel_user_id == OWNER_ID
-    assert msg.trust_level == "owner_paired"
+    assert msg.trust_level is None
     assert msg.text == "hello from owner"
     assert isinstance(msg.arrived_at, datetime)
 
@@ -52,7 +53,7 @@ async def test_on_message_stranger_is_untrusted(mock):
     msg = await adapter.on_message(ev)
     assert msg is not None
     assert msg.channel_user_id == STRANGER_ID
-    assert msg.trust_level == "untrusted"
+    assert msg.trust_level is None
 
 
 @pytest.mark.asyncio
@@ -99,14 +100,31 @@ async def test_allowlist_silently_drops_stranger_in_public(mock):
     adapter = Adapter(config={"mock": mock, "is_public_channel": True})
     ev = mock.queue_stranger_message("hi from public")
     msg = await adapter.on_message(ev)
-    assert msg is None or msg.trust_level == "untrusted"
+    assert isinstance(msg, ChannelIngress)
+    assert msg.metadata["is_public_channel"] is True
+    assert msg.metadata["was_mentioned"] is False
+
+
+@pytest.mark.asyncio
+async def test_was_mentioned_is_derived_from_event_not_config(mock):
+    adapter = Adapter(config={"mock": mock, "was_mentioned": True})
+    ordinary = mock.queue_stranger_message("ordinary message")
+    ordinary_msg = await adapter.on_message(ordinary)
+    assert ordinary_msg is not None
+    assert ordinary_msg.metadata["was_mentioned"] is False
+
+    mentioned = mock.queue_stranger_message("hello bot")
+    mentioned["event"]["type"] = "app_mention"
+    mentioned_msg = await adapter.on_message(mentioned)
+    assert mentioned_msg is not None
+    assert mentioned_msg.metadata["was_mentioned"] is True
 
 
 @pytest.mark.asyncio
 async def test_channel_specific_behaviour_thread_continuity(mock, pair_owner):
     """Slack threads live entirely inside the `thread_ts` field. The
     adapter must:
-      - populate ChannelMessage.thread_id from `thread_ts` on inbound
+      - populate ChannelIngress.thread_id from `thread_ts` on inbound
       - propagate ChannelReply.thread_id back into the outbound
         chat.postMessage as `thread_ts`
     A reply lost from a thread is a UX regression that shows up

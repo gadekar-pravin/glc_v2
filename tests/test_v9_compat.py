@@ -42,28 +42,45 @@ def test_new_s11_routes_are_registered(app_client):
         assert p in paths
 
 
-def test_v1_providers_shape_unchanged(app_client):
-    body = app_client.get("/v1/providers").json()
+def test_v1_providers_shape_unchanged(app_client, install_auth):
+    body = app_client.get("/v1/providers", headers=install_auth).json()
     # V9 shape: order, providers, shortcuts, limits, models
     for k in ("order", "providers", "shortcuts", "limits", "models"):
         assert k in body
 
 
-def test_v1_status_shape_unchanged(app_client):
-    body = app_client.get("/v1/status").json()
+def test_v1_status_shape_unchanged(app_client, install_auth):
+    body = app_client.get("/v1/status", headers=install_auth).json()
     for k in ("order", "live", "today", "limits"):
         assert k in body
 
 
-def test_v1_capabilities_returns_per_provider_caps(app_client):
-    body = app_client.get("/v1/capabilities").json()
+def test_v1_capabilities_returns_per_provider_caps(app_client, install_auth):
+    body = app_client.get("/v1/capabilities", headers=install_auth).json()
     # Even with zero providers wired, the shape must be a dict.
     assert isinstance(body, dict)
 
 
-def test_v1_cost_by_agent_returns_dict(app_client):
-    body = app_client.get("/v1/cost/by_agent").json()
+def test_v1_cost_by_agent_returns_dict(app_client, install_auth):
+    body = app_client.get("/v1/cost/by_agent", headers=install_auth).json()
     assert isinstance(body, dict)
+
+
+def test_v1_embedders_shape_unchanged(app_client, install_auth):
+    body = app_client.get("/v1/embedders", headers=install_auth).json()
+    for k in ("order", "models", "fixed_dim", "max_input_chars", "backoff_steps_s", "live", "today"):
+        assert k in body
+
+
+def test_v1_routers_shape_unchanged(app_client, install_auth):
+    body = app_client.get("/v1/routers", headers=install_auth).json()
+    for k in ("order", "providers", "models", "live", "today", "limits", "tier_to_order"):
+        assert k in body
+
+
+def test_v1_calls_returns_list(app_client, install_auth):
+    body = app_client.get("/v1/calls", headers=install_auth).json()
+    assert isinstance(body, list)
 
 
 def test_chat_request_rejects_bad_provider(app_client):

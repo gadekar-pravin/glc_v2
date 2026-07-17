@@ -14,13 +14,10 @@ import math
 import struct
 import wave
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 
 from glc.channels.base import ChannelAdapter
-from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.security.allowlists import allowed
-from glc.security.pairing import get_pairing_store
-from glc.security.trust_level import classify
+from glc.channels.envelope import ChannelIngress, ChannelReply
 from glc.voice.stt import transcribe as transcribe_audio
 from glc.voice.tts import synthesize as synthesize_speech
 
@@ -30,38 +27,25 @@ DEFAULT_VAD_RMS_THRESHOLD = 200.0
 class Adapter(ChannelAdapter):
     name = "local_mic"
 
-    async def on_message(self, raw: Any) -> ChannelMessage:
+    async def on_message(self, raw: Any) -> ChannelIngress | None:
         mock = self.config.get("mock")
         if mock is not None and mock.pop_disconnect():
-            return _drop()
+            return None
 
         if not isinstance(raw, dict):
-            return _drop()
+            return None
 
         wav_bytes = _as_bytes(raw.get("wav_bytes") or raw.get("audio_bytes") or b"")
         if not wav_bytes:
-            return _drop()
+            return None
 
         speaker_id = str(raw.get("speaker_id") or raw.get("channel_user_id") or "local")
         speaker_handle = str(raw.get("speaker_handle") or raw.get("user_handle") or speaker_id)
-        trust_level = classify(self.name, speaker_id)
-
         is_public_channel = bool(self.config.get("is_public_channel", raw.get("is_public_channel", False)))
         was_mentioned = bool(raw.get("was_mentioned", False))
-        if is_public_channel:
-            owners = [p.channel_user_id for p in get_pairing_store().owners(channel=self.name)]
-            ok, _why = allowed(
-                self.name,
-                speaker_id,
-                owner_ids=owners,
-                is_public_channel=True,
-                was_mentioned=was_mentioned,
-            )
-            if not ok:
-                return _drop()
 
         if _is_silent(wav_bytes, threshold=_vad_threshold(self.config)):
-            return _drop()
+            return None
 
         mime = str(raw.get("mime") or "audio/wav")
         stt_prefer = str(
@@ -73,16 +57,15 @@ class Adapter(ChannelAdapter):
         transcript = await transcribe_audio(wav_bytes, mime, prefer=stt_prefer)
         text = transcript.text.strip()
         if not text:
-            return _drop()
+            return None
 
         voice_audio_ref = _artifact_ref(wav_bytes, mock=mock)
-        return ChannelMessage(
+        return ChannelIngress(
             channel=self.name,
             channel_user_id=speaker_id,
             user_handle=speaker_handle,
             text=text,
             voice_audio_ref=voice_audio_ref,
-            trust_level=trust_level,
             arrived_at=datetime.now(UTC),
             metadata={
                 "source": raw.get("source", "mic"),
@@ -128,10 +111,6 @@ def _as_bytes(value: Any) -> bytes:
     if isinstance(value, memoryview):
         return value.tobytes()
     return b""
-
-
-def _drop() -> ChannelMessage:
-    return cast(ChannelMessage, None)
 
 
 def _vad_threshold(config: dict[str, Any]) -> float:
