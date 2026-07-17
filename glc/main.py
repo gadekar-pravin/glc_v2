@@ -5,6 +5,7 @@ S11 surfaces (transcribe, speak, channels WS, control) sit alongside.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import os
 import signal
@@ -25,7 +26,7 @@ from glc import providers as P  # noqa: E402
 from glc.audit import init_store as init_audit  # noqa: E402
 from glc.cache import GeminiCache  # noqa: E402
 from glc.config import get_or_create_install_token  # noqa: E402
-from glc.policy import reload_engine  # noqa: E402
+from glc.policy import ProcessPolicyClient  # noqa: E402
 from glc.routes import channels as channels_route  # noqa: E402
 from glc.routes import chat as chat_route  # noqa: E402
 from glc.routes import control as control_route  # noqa: E402
@@ -37,18 +38,17 @@ from glc.routing import Router, RouterPool  # noqa: E402
 PORT = int(os.getenv("GLC_PORT", "8111"))
 
 
-def _install_sighup_reload() -> None:
+def _install_sighup_reload(policy_client: ProcessPolicyClient) -> None:
     """Hot-reload policy.yaml on SIGHUP. Windows lacks SIGHUP so this is
     a no-op there."""
     if not hasattr(signal, "SIGHUP"):
         return
 
     def _handler(signum, frame):  # noqa: ARG001
-        try:
-            reload_engine()
+        if policy_client.reload():
             print("[glc] policy.yaml reloaded via SIGHUP")
-        except Exception as e:
-            print(f"[glc] SIGHUP reload failed: {e!r}")
+        else:
+            print("[glc] SIGHUP reload failed: policy worker unavailable")
 
     try:
         signal.signal(signal.SIGHUP, _handler)
@@ -60,19 +60,26 @@ def _install_sighup_reload() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db.init()
-    init_audit()
-    get_or_create_install_token()
-    _install_sighup_reload()
-    app.state.cache = GeminiCache(ttl_seconds=300)
-    app.state.providers = P.build_providers(app.state.cache)
-    app.state.router = Router(app.state.providers, chat_route.ORDER)
-    app.state.router_providers = P.build_router_providers()
-    app.state.router_pool = RouterPool(app.state.router_providers, chat_route.ROUTER_ORDER)
-    app.state.embedders, app.state.embed_order = E.build_embedders()
-    app.state.started_at = time.time()
-    app.state.registered_channels = []
-    yield
+    policy_client = ProcessPolicyClient()
+    policy_client.start()
+    print(f"[glc] policy worker ready pid={policy_client.worker_pid}")
+    app.state.policy_client = policy_client
+    try:
+        db.init()
+        init_audit()
+        get_or_create_install_token()
+        _install_sighup_reload(policy_client)
+        app.state.cache = GeminiCache(ttl_seconds=300)
+        app.state.providers = P.build_providers(app.state.cache)
+        app.state.router = Router(app.state.providers, chat_route.ORDER)
+        app.state.router_providers = P.build_router_providers()
+        app.state.router_pool = RouterPool(app.state.router_providers, chat_route.ROUTER_ORDER)
+        app.state.embedders, app.state.embed_order = E.build_embedders()
+        app.state.started_at = time.time()
+        app.state.registered_channels = []
+        yield
+    finally:
+        policy_client.close()
 
 
 def _production_mode() -> bool:
@@ -152,6 +159,12 @@ def create_app(*, production: bool | None = None) -> FastAPI:
 
     @application.get("/healthz")
     async def healthz():
+        policy_client = getattr(application.state, "policy_client", None)
+        if policy_client is None or not await asyncio.to_thread(policy_client.ping):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "port": PORT, "policy": "unavailable"},
+            )
         return {"ok": True, "port": PORT}
 
     return application

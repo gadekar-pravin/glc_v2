@@ -16,16 +16,22 @@ never hand a Discord embed or a Telegram InputFile to the agent.
 Lives in: `glc/channels/envelope.py`, `glc/channels/base.py`.
 Answers: ClawJacked.
 
-## 2. The policy engine runs outside the LLM context
+## 2. The policy engine runs in a separate process
 
-`glc/policy/engine.py` is a small declarative evaluator. Rules are
-specified in `glc/policy/policy.yaml` (or `~/.glc/policy.yaml` to
-override). Every tool call is intercepted before dispatch and evaluated.
-First matching rule wins; ties resolve to deny. The defaults for
-`owner_paired` and `untrusted` are allow and deny respectively. The
-yaml hot-reloads on `SIGHUP`.
+`glc/policy/engine.py` is a pure declarative evaluator. The gateway never imports it as an
+enforcement entry point. During FastAPI startup, `ProcessPolicyClient` launches a clean child
+interpreter running `glc.policy.worker` and communicates over request-ID-bound JSON lines on private
+stdin/stdout pipes. Rules are specified in `glc/policy/policy.yaml` (or `~/.glc/policy.yaml` to
+override). First matching rule wins; ties resolve to deny. The defaults for `owner_paired` and
+`untrusted` are allow and deny respectively.
 
-Lives in: `glc/policy/`.
+The worker independently loads the policy file and receives no provider, control-plane, signing, or
+slot-identity secrets. A missing, timed-out, crashed, or malformed worker fails closed with a deny
+verdict and makes `/healthz` return HTTP 503. `SIGHUP` is forwarded to the worker for hot reload. The
+current S11 channel agent remains an echo stub; its eventual tool dispatcher must use the
+lifespan-owned client rather than instantiate `PolicyEngine` in the gateway.
+
+Lives in: `glc/policy/`, lifecycle wiring in `glc/main.py`.
 Answers: the Summer Yue email-deletion incident, where the "confirm
 before acting" rule lived inside the conversation context and was
 erased by context compaction. Yaml does not compact.

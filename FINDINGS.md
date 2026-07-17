@@ -156,6 +156,56 @@ HTTP 200 after cleanup. The deployed Telegram probe reported `install_token_env_
 was rejected, scoped use reached the mock-provider boundary with 502, replay returned 401,
 cross-tool use returned 403, and intended use after denial again reached the boundary with 502.
 
+## Leak 5 — In-process code could disable the policy engine
+
+**Invariant broken.** Policy authorization must run outside the mutable process context of the code
+it constrains. A policy check is not an enforcement boundary when in-process code can replace it.
+
+**Attacker role.** Code executing inside the gateway interpreter. Before slot isolation, this
+included every in-process channel adapter; the supplied assignment reproduction deliberately models
+that capability.
+
+**Finding.** The gateway exposed policy evaluation as a mutable module-level Python function. The
+assignment snippet replaced that function with an unconditional allow verdict for every later caller
+that resolved the module attribute:
+
+```python
+import glc.policy.engine as e
+from glc.policy.schemas import PolicyVerdict
+
+e.evaluate = lambda *a, **k: PolicyVerdict(action="allow", reason="pwn")
+```
+
+The safe pre-fix reproduction used an isolated temporary configuration. The same untrusted call was
+first denied with `untrusted sender cannot dispatch any tool`, then returned
+`{"action":"allow","reason":"pwn"}` after the rebind.
+
+**Fix.** `PolicyEngine` is now a pure evaluator used only by a policy worker launched as a clean
+`python -m glc.policy.worker` child interpreter. The gateway's lifespan owns a
+`ProcessPolicyClient` and exchanges request-ID-bound JSON lines over private stdin/stdout pipes. The
+worker loads and reloads `policy.yaml` itself, receives no provider keys, install token, signing key,
+or slot identities, and reserves stdout for the validated protocol. `SIGHUP` reloads are forwarded
+to the worker.
+
+Startup fails if the child cannot prove readiness or reports a sensitive environment variable.
+After startup, a crash, timeout, broken pipe, malformed response, mismatched request ID, worker
+error, or invalid `PolicyVerdict` permanently marks the client unhealthy and returns a deterministic
+deny verdict. `/healthz` reports HTTP 503 until the gateway restarts. The removed module-level
+singleton and evaluation functions are not used by production code; assigning an `evaluate`
+attribute in the gateway interpreter therefore cannot change the separately imported worker.
+
+**Post-fix evidence.** The regression patches both `glc.policy.engine.evaluate` and
+`PolicyEngine.evaluate` in the parent before the child starts, verifies the worker has a different
+PID, and observes the untrusted call remain denied. Rebinding again after startup also leaves the
+worker verdict unchanged. Focused tests cover reload, malformed-policy deny fallback, 32 concurrent
+evaluations, secret stripping, graceful shutdown, child death, protocol failure, timeout, HTTP 503
+readiness, and a static ban on production imports of the in-process evaluator.
+
+This assignment-scoped boundary protects evaluator code and state from the supplied monkey-patch. It
+does not claim to withstand arbitrary gateway code that patches the IPC client or bypasses policy
+entirely; that stronger threat model requires policy authorization and protected action dispatch to
+move together into a separate broker.
+
 ## Full route map exposed by public OpenAPI document
 
 **Invariant broken.** Every externally reachable gateway surface must authenticate the caller before

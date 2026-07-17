@@ -67,9 +67,6 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.security.rate_limits as _r
 
     _r._limiter = None
-    import glc.policy.engine as _e
-
-    _e._engine = None
     import glc.audit.store as _a
 
     _a._singleton = None

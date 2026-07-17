@@ -1,8 +1,8 @@
 # Policy guide
 
-The policy engine is the deterministic safety layer that runs outside
-the LLM context. Lecture §10 documents the five default rules; this
-guide explains how to extend them.
+The policy engine is the deterministic safety layer that runs in a dedicated child process, outside
+the gateway interpreter and LLM context. Lecture §10 documents the five default rules; this guide
+explains how to extend them.
 
 ## Where policy lives
 
@@ -10,7 +10,13 @@ guide explains how to extend them.
 override on your installation, drop a `policy.yaml` into `~/.glc/`.
 The engine prefers the user file when present.
 
-Hot-reload by sending `SIGHUP` to the gateway process:
+The gateway starts `glc.policy.worker` during FastAPI lifespan and communicates with it through a
+validated JSON-lines protocol. The child loads policy independently and receives no gateway
+credentials. If it stops answering, policy evaluation denies by default and `/healthz` returns HTTP
+503 until the gateway restarts.
+
+Hot-reload by sending `SIGHUP` to the gateway process. The gateway forwards the reload request to
+the child:
 
 ```sh
 kill -HUP $(pgrep -f "uv run glc serve")
@@ -18,6 +24,9 @@ kill -HUP $(pgrep -f "uv run glc serve")
 
 Malformed YAML does not crash the gateway: the engine falls back to
 a deny-everything safe default and logs the parse error.
+
+Production gateway code must use the lifespan-owned `app.state.policy_client`. Importing or
+instantiating `PolicyEngine` outside `glc.policy` is forbidden by a regression test.
 
 ## Rule shape
 
