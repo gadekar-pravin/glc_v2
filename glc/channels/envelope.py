@@ -45,9 +45,10 @@ class ChannelIngress(BaseModel):
     """Untrusted adapter-to-gateway envelope.
 
     ``channel`` and ``trust_level`` remain accepted for compatibility with
-    existing slot clients, but neither field is authoritative.  The gateway
-    binds the channel to the authenticated slot and derives trust from its own
-    pairing database before constructing a :class:`ChannelMessage`.
+    existing slot clients, but neither field is authoritative.  The declared
+    channel must match the authenticated WebSocket route; the gateway then
+    binds the channel to that route and derives trust from its own pairing
+    database before constructing a :class:`ChannelMessage`.
     """
 
     channel: str

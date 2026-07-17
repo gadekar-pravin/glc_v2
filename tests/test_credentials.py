@@ -230,14 +230,13 @@ def test_gateway_uses_pairing_db_even_when_adapter_claims_untrusted(credential_c
     assert response["text"] == "[glc echo] boundary probe"
 
 
-def test_gateway_normalizes_claimed_channel_to_authenticated_slot(credential_client):
-    _pair_owner(credential_client, user_id="route-owner")
+def test_gateway_rejects_claimed_channel_that_differs_from_route(credential_client):
     headers = {"Authorization": "Bearer telegram-identity"}
     with credential_client.websocket_connect("/v1/channels/telegram", headers=headers) as websocket:
         websocket.send_json(_ingress(user_id="route-owner", channel="discord", trust_level="owner_paired"))
-        response = websocket.receive_json()
-    assert "error" not in response, response
-    assert response["channel"] == "telegram"
+        with pytest.raises(WebSocketDisconnect) as rejected:
+            websocket.receive_json()
+    assert rejected.value.code == 1008
 
 
 def test_gateway_refreshes_pairings_without_websocket_reconnect(credential_client):
